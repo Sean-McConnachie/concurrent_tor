@@ -12,7 +12,7 @@ to allow for polymorphism. There is a `request::Task` trait which must be implem
 can be added to allow for more functionality. For example:
 
 **Note:** If you are defining your own trait (such as `MyExt` in the following example), add 
-`enum_delegate = { git = "https://gitlab.com/Sean-McConnachie/enum_delegate_0.3.0" }` to your `Cargo.toml` file.
+`enum_delegate = { package = "temporary_enum_delegate_0_3_0" }`.
 
 ```rust
 #[delegate]  // <-- Additional traits must be annotated with `#[delegate]`

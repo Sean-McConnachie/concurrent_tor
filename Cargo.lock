@@ -388,12 +388,12 @@ dependencies = [
  "arti-client",
  "arti-hyper",
  "async-trait",
- "enum_delegate",
  "futures",
  "hyper",
  "log",
  "serde",
  "serde_json",
+ "temporary_enum_delegate_0_3_0",
  "thiserror",
  "tls-api",
  "tls-api-native-tls",
@@ -777,17 +777,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "enum_delegate"
-version = "0.3.0"
-source = "git+https://gitlab.com/Sean-McConnachie/enum_delegate_0.3.0#f99967517e925f9630735836fb1601747df9c71d"
-dependencies = [
- "enum_delegate_codegen",
-]
-
-[[package]]
 name = "enum_delegate_codegen"
 version = "0.3.0"
-source = "git+https://gitlab.com/Sean-McConnachie/enum_delegate_0.3.0#f99967517e925f9630735836fb1601747df9c71d"
 dependencies = [
  "itertools",
  "proc-macro-crate",
@@ -2407,6 +2398,13 @@ dependencies = [
  "redox_syscall",
  "remove_dir_all",
  "winapi",
+]
+
+[[package]]
+name = "temporary_enum_delegate_0_3_0"
+version = "0.3.0"
+dependencies = [
+ "enum_delegate_codegen",
 ]
 
 [[package]]
