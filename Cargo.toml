@@ -16,9 +16,8 @@ keywords = ["tor", "queue", "dispatcher", "async", "requests"]
 categories = ["Asynchronous", "Network programming"]
 
 authors = ["Sean McConnachie <seanjulian.mcc@gmail.com>"]
-license = "MIT or Apache-2.0"
+license = "MIT OR Apache-2.0"
 
-homepage = "https://github.com/Sean-McConnachie/concurrent_tor"
 repository = "https://github.com/Sean-McConnachie/concurrent_tor"
 
 [dependencies]
