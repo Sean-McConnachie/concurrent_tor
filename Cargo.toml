@@ -1,0 +1,41 @@
+[package]
+name = "concurrent_tor"
+version = "0.1.0"
+edition = "2021"
+include = [
+    "src/**/*",
+    "Cargo.toml",
+    "README.md",
+    "Cargo.lock",
+    "enum_delegate/**/*",
+]
+
+description = "An asynchronous implementation of multiple tor clients, with a dispatcher which can pass requests by a user-defined queue."
+readme = "README.md"
+keywords = ["tor", "queue", "dispatcher", "async", "requests"]
+categories = ["Asynchronous", "Network programming"]
+
+authors = ["Sean McConnachie <seanjulian.mcc@gmail.com>"]
+license = "MIT or Apache-2.0"
+
+homepage = "https://github.com/Sean-McConnachie/concurrent_tor"
+repository = "https://github.com/Sean-McConnachie/concurrent_tor"
+
+[dependencies]
+log = { version = "0.4.0" }
+anyhow = { version = "1.0.68" }
+thiserror = { version = "1.0.38" }
+async-trait = { version = "0.1.61" }
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1.20.0", features = ["macros"]}
+
+hyper = { version = "0.14.23" }
+tls-api = { version = "0.9.0" }
+futures = { version = "0.3.25" }
+arti-hyper = { version = "0.8.0" }
+arti-client = { version = "0.8.0" }
+tor-rtcompat = { version = "0.8.0" }
+tls-api-openssl = { version = "0.9.0" }
+tls-api-native-tls = { version = "0.9.0" }
+enum_delegate = { path = "enum_delegate" }  # This is a newer version which the authors (Reinis Mazeiks, 50U10FCA7) have not published to crates.io yet.
+serde_json = { version = "1.0.91" }
