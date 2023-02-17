@@ -14,6 +14,8 @@ pub use hyper;
 pub use log;
 pub use tokio;
 
+#[macro_use]
+
 /// Library modules
 pub mod circuit;
 pub mod circuit_handler;

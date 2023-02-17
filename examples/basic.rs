@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use concurrent_tor::delegate;
 use concurrent_tor::anyhow;
 use concurrent_tor::hyper;
 use concurrent_tor::tokio;
@@ -20,6 +19,10 @@ use concurrent_tor::request;
 
 use concurrent_tor::dispatcher::Dispatcher;
 use concurrent_tor::task::Task;
+
+use concurrent_tor::delegate;
+// Add to `Cargo.toml` if specifying your own traits: enum_delegate = { git = "https://gitlab.com/Sean-McConnachie/enum_delegate_0.3.0" }
+// This is a newer version of enum_delegate which the authors (Reinis Mazeiks, 50U10FCA7) have not published to crates.io yet.
 
 #[delegate]
 pub trait MyExt {

@@ -11,6 +11,9 @@ Your implementation of a task. This library uses enum_delegate [enum_delegate](h
 to allow for polymorphism. There is a `request::Task` trait which must be implemented. In addition to this, more traits
 can be added to allow for more functionality. For example:
 
+**Note:** If you are defining your own trait (such as `MyExt` in the following example), add 
+`enum_delegate = { git = "https://gitlab.com/Sean-McConnachie/enum_delegate_0.3.0" }` to your `Cargo.toml` file.
+
 ```rust
 #[delegate]  // <-- Additional traits must be annotated with `#[delegate]`
 pub trait MyExt {

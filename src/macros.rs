@@ -25,10 +25,3 @@ macro_rules! tokio_mutex {
         tokio::sync::Mutex::new($e)
     };
 }
-
-#[macro_export]
-macro_rules! impl_task {
-    () => {
-        #[enum_delegate::implement(Task)]
-    }
-}

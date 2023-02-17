@@ -8,20 +8,62 @@ use crate::request;
 ///
 /// Example implementation:
 /// ```rust
-/// #[delegate]
-/// pub trait MyExt {
-///     fn get_priority(&self) -> usize;
-/// }
+/// use std::sync::Arc;
+/// use std::sync::Mutex;
+///
+/// use concurrent_tor::request;
+/// use concurrent_tor::errors;
+/// use concurrent_tor::delegate;
+/// use concurrent_tor::async_trait;
+/// use concurrent_tor::{arc, std_mutex};
+/// use concurrent_tor::task::Task;
+/// use concurrent_tor::dispatcher::Dispatcher;
+///
+/// # #[derive(Debug)]
+/// # struct ExampleTaskDispatcher<T> {
+/// #     tasks: Arc<Mutex<Vec<T>>>,
+/// # }
+/// # impl<T> ExampleTaskDispatcher<T>
+/// #     where
+/// #         T: Task,  // + MyExt
+/// # {
+/// #     fn new() -> ExampleTaskDispatcher<T> {
+/// #         let tasks = arc!(std_mutex!(vec![]));
+/// #         ExampleTaskDispatcher { tasks }
+/// #     }
+/// # }
+/// # impl<T> Dispatcher<T> for ExampleTaskDispatcher<T>
+/// #     where
+/// #         T: Task,  // + MyExt
+/// # {
+/// #     fn get_task(&self) -> Option<T> {
+/// #         let mut guard = self.tasks.lock().unwrap();
+/// #         let rtn_value = guard.pop();
+/// #         rtn_value
+/// #     }
+/// #     fn add_task(&self, task: T) {
+/// #         let mut guard = self.tasks.lock().unwrap();
+/// #         // dbg!(task.get_priority());
+/// #         guard.push(task);
+/// #     }
+/// # }
+/// // Add the following to `Cargo.toml` if specifying your own trait:
+/// // enum_delegate = { git = "https://gitlab.com/Sean-McConnachie/enum_delegate_0.3.0" }
+///
+/// // #[delegate]
+/// // trait MyExt {
+/// //     fn get_priority(&self) -> usize;
+/// // }
 ///
 /// #[derive(Debug)]
-/// #[delegate(derive(Task, MyExt))]
-/// pub enum ExampleTaskEnum {
+/// #[delegate(derive(Task))]  // ...derive(Task, MyExt)...
+/// enum ExampleTaskEnum {
 ///     TaskOne(ExampleTaskOne),
 ///     // TaskTwo(ExampleTaskTwo),
 /// }
 ///
 /// #[derive(Debug)]
-/// pub struct ExampleTaskOne {
+/// struct ExampleTaskOne {
 ///     priority: usize,
 ///     task_dispatcher: Arc<ExampleTaskDispatcher<ExampleTaskEnum>>,
 ///     request: request::Request,
@@ -62,11 +104,11 @@ use crate::request;
 ///     }
 /// }
 ///
-/// impl MyExt for ExampleTaskOne {
-///     fn get_priority(&self) -> usize {
-///         self.priority
-///     }
-/// }
+/// // impl MyExt for ExampleTaskOne {
+/// //     fn get_priority(&self) -> usize {
+/// //         self.priority
+/// //     }
+/// // }
 /// ```
 
 #[async_trait]
