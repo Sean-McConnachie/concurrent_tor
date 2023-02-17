@@ -38,4 +38,4 @@ tor-rtcompat = { version = "0.8.0" }
 tls-api-openssl = { version = "0.9.0" }
 tls-api-native-tls = { version = "0.9.0" }
 serde_json = { version = "1.0.91" }
-enum_delegate = { git = "https://gitlab.com/Sean-McConnachie/enum_delegate_0.3.0" }  # This is a newer version which the authors (Reinis Mazeiks, 50U10FCA7) have not published to crates.io yet.
+enum_delegate = { git = "https://gitlab.com/Sean-McConnachie/enum_delegate_0.3.0", version = "0.3.0" }  # This is a newer version which the authors (Reinis Mazeiks, 50U10FCA7) have not published to crates.io yet.
