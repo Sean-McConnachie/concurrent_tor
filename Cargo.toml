@@ -2,13 +2,6 @@
 name = "concurrent_tor"
 version = "0.1.0"
 edition = "2021"
-include = [
-    "src/**/*",
-    "Cargo.toml",
-    "README.md",
-    "Cargo.lock",
-    "enum_delegate/**/*",
-]
 
 description = "An asynchronous implementation of multiple tor clients, with a dispatcher which can pass requests by a user-defined queue."
 readme = "README.md"
