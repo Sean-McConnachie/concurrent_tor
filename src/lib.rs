@@ -1,26 +1,19 @@
-//! ## Concurrent Tor
-//! This library was built to allow for multiple tor clients, with different ips to run simultaneously,
-//! getting their data from a user-defined dispatcher (which could implement a queue system). It
-//! has supports for user-defined "Tasks" which must implement the `Task` trait. This allows for a
-//! callback when a request has been completed, for example, to save to a file/insert to a database.
-//!
-//! There is also support for scraping the web archive, if, for exampple, a page has been deleted.
+pub mod config;
+pub mod database;
+pub mod error;
+pub mod execution;
+pub mod utils;
 
-/// External libraries
-pub use anyhow;
-pub use async_trait::async_trait;
-pub use enum_delegate::delegate;
-pub use hyper;
-pub use log;
-pub use tokio;
+pub use error::{Error, Result};
+pub use utils::*;
 
-/// Library modules
-pub mod circuit;
-pub mod circuit_handler;
-pub mod configs;
-pub mod dispatcher;
-pub mod errors;
-pub mod logging;
-pub mod macros;
-pub mod request;
-pub mod task;
+pub mod exports {
+    pub use arti_client::{TorClient, TorClientConfig};
+    pub use async_trait::async_trait;
+    pub use http_body_util::BodyExt;
+    pub use murmur3::murmur3_x64_128;
+    pub use serde_json::from_str as json_from_str;
+    pub use serde_json::to_string as json_to_string;
+    pub use strum::FromRepr;
+    pub use tor_rtcompat::PreferredRuntime;
+}
