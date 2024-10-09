@@ -1,20 +1,23 @@
-use crate::config::{BrowserPlatformConfig, HttpPlatformConfig, WorkerConfig};
-use crate::execution::browser::{BrowserPlatformBuilder, BrowserPlatformData, BrowserWorker};
-use crate::execution::cron::CronPlatform;
-use crate::execution::http::{HttpPlatformBuilder, HttpPlatformData, HttpWorker};
-use crate::execution::scheduler::{
-    Job, JobDistributor, MainTorClient, NotRequested, QueueJob, QueueJobStatus, Scheduler,
+use crate::{
+    config::{BrowserPlatformConfig, HttpPlatformConfig, WorkerConfig},
+    database::connect_and_init_db,
+    execution::{
+        browser::{BrowserPlatformBuilder, BrowserPlatformData, BrowserWorker},
+        cron::CronPlatform,
+        http::{HttpPlatformBuilder, HttpPlatformData, HttpWorker},
+        scheduler::{
+            Job, JobDistributor, MainTorClient, NotRequested, PlatformT, QueueJob, QueueJobStatus,
+            Scheduler,
+        },
+    },
+    Result,
 };
-use crate::Result;
 use arti_client::TorClientConfig;
 use crossbeam::channel::unbounded;
 use log::info;
 use std::collections::HashMap;
 
-use super::scheduler::PlatformT;
-
 pub async fn run_scraper_runtime<T: Scheduler<P>, P: PlatformT>(
-    pool: &sqlx::PgPool,
     worker_config: WorkerConfig,
     scheduler: T,
 
@@ -27,6 +30,8 @@ pub async fn run_scraper_runtime<T: Scheduler<P>, P: PlatformT>(
     browser_platform_configs: HashMap<P, BrowserPlatformConfig>,
     browser_platforms: Vec<Box<dyn BrowserPlatformBuilder<P>>>,
 ) -> Result<()> {
+    let pool = connect_and_init_db().await?;
+
     let (request_job_tx, request_job_rx) = unbounded::<QueueJobStatus>();
     let (queue_job_tx, queue_job_rx) = unbounded::<QueueJob<P>>();
 
@@ -43,7 +48,7 @@ pub async fn run_scraper_runtime<T: Scheduler<P>, P: PlatformT>(
             txs.insert(browser_platform.platform(), browser_worker_tx.clone());
         }
         JobDistributor::new(
-            pool.clone(),
+            pool,
             request_job_rx,
             request_job_tx.clone(),
             queue_job_rx,

@@ -1,6 +1,8 @@
-use crate::config::BrowserPlatformConfig;
-use crate::execution::scheduler::{Job, MainTorClient, NotRequested, QueueJob, QueueJobStatus};
-use crate::Result;
+use crate::{
+    config::BrowserPlatformConfig,
+    execution::scheduler::{Job, MainTorClient, NotRequested, PlatformT, QueueJob, QueueJobStatus},
+    Result,
+};
 use arti::socks::run_socks_proxy;
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
@@ -11,8 +13,6 @@ use std::collections::HashMap;
 use tokio::task::JoinHandle;
 use tor_config::Listen;
 
-use super::scheduler::PlatformT;
-
 pub trait BrowserPlatformBuilder<P: PlatformT> {
     fn platform(&self) -> P;
     fn build(&self) -> Box<dyn BrowserPlatform<P>>;
@@ -20,7 +20,8 @@ pub trait BrowserPlatformBuilder<P: PlatformT> {
 
 #[async_trait]
 pub trait BrowserPlatform<P: PlatformT>: Send {
-    async fn process_job(&self, job: Job<NotRequested, P>, tab: &Tab) -> Result<Vec<QueueJob<P>>>;
+    /// Function should not fail when passed back to the API. Therefore, it should handle all errors itself.
+    async fn process_job(&self, job: Job<NotRequested, P>, tab: &Tab) -> Vec<QueueJob<P>>;
 }
 
 enum BrowserPlatformBehaviourError {
@@ -66,12 +67,9 @@ where
         self.last_request = Utc::now();
     }
 
-    fn reset(self) -> Self {
-        BrowserPlatformData {
-            last_request: Utc.timestamp_opt(0, 0).unwrap(),
-            requests: 0,
-            ..self
-        }
+    fn reset(&mut self) {
+        self.last_request = Utc.timestamp_opt(0, 0).unwrap();
+        self.requests = 0;
     }
 }
 
@@ -93,6 +91,7 @@ pub struct BrowserWorker<P: PlatformT> {
     proxy_handle: JoinHandle<()>,
     /// Browser handle
     browser: Browser,
+    #[allow(dead_code)]
     /// Headless mode
     headless: bool,
     /// Listener port
@@ -176,7 +175,8 @@ where
                 BrowserPlatformBehaviourError::Ok => {
                     debug!("Processing job for browser worker {}", self.worker_id);
                     let tab = self.browser.new_tab()?;
-                    let jobs = platform.platform_impl.process_job(job, &tab).await?;
+                    let jobs = platform.platform_impl.process_job(job, &tab).await;
+                    platform.request_complete();
                     for job in jobs {
                         self.queue_job.send(job)?;
                     }
@@ -193,8 +193,15 @@ where
                     self.requeue_job.send(job)?;
                     // Renew the client so we get a new IP
                     self = self.renew_client()?;
+                    // Reset all platforms so we can make more requests
+                    for (_, platform) in self.platforms.iter_mut() {
+                        platform.reset();
+                    }
                 }
             }
+            self.request_job.send(QueueJobStatus::WorkerCompleted {
+                worker_id: self.worker_id,
+            })?;
         }
     }
 }

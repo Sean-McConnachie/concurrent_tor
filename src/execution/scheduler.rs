@@ -1,6 +1,8 @@
-use crate::config::WorkerConfig;
-use crate::database::{JobCache, JobStatusDb};
-use crate::Result;
+use crate::{
+    config::WorkerConfig,
+    database::{JobCache, JobStatusDb, DB},
+    Result,
+};
 use arti_client::{TorClient, TorClientConfig};
 use crossbeam::channel::{Receiver, Sender};
 use log::debug;
@@ -14,9 +16,10 @@ use tor_rtcompat::PreferredRuntime;
 
 // #[derive(Serialize, Deserialize, Debug, Clone, Hash, Eq, PartialEq, sqlx::Type)]
 pub trait PlatformT:
-    DeserializeOwned + Into<i32> + Debug + Clone + Hash + Eq + PartialEq + Send + Sync + Unpin + 'static
+    DeserializeOwned + Debug + Clone + Copy + Hash + Eq + PartialEq + Send + Sync + Unpin + 'static
 {
     fn request_from_json(&self, json: &str) -> Result<Box<dyn WorkerRequest>>;
+    fn to_repr(&self) -> usize;
     fn from_repr(repr: usize) -> Self;
 }
 
@@ -137,7 +140,7 @@ pub enum QueueJobStatus {
 }
 
 pub struct JobDistributor<S: Scheduler<P>, P: PlatformT> {
-    db: sqlx::PgPool,
+    db: DB,
     /// Receive signal from a worker to enqueue a job.
     request_job: Receiver<QueueJobStatus>,
     /// Send a signal to dequeue a job.
@@ -158,7 +161,7 @@ where
     // TODO: Fix target circulation
     // TODO: Check if there are duplicate jobs in the queue - remove if so
     pub fn new(
-        db: sqlx::PgPool,
+        db: DB,
         request_job: Receiver<QueueJobStatus>,
         notify_new_job: Sender<QueueJobStatus>,
         queue_job: Receiver<QueueJob<P>>,
@@ -194,7 +197,7 @@ where
     }
 
     async fn loop_enqueue(
-        db: sqlx::PgPool,
+        mut db: DB,
         queue_job: Receiver<QueueJob<P>>,
         notify_new_job: Sender<QueueJobStatus>,
         scheduler: Arc<Mutex<S>>,
@@ -202,7 +205,7 @@ where
         debug!("Starting enqueue loop");
 
         // initialize the scheduler with what is in the database
-        let jobs = JobCache::<P>::fetch_all_active(&db).await?;
+        let jobs = JobCache::<P>::fetch_all_active(&mut db).await?;
         for job in jobs {
             let request = job.platform.request_from_json(&job.request)?;
             let job = Job::new(job.platform, request, job.num_attempts as u32);
@@ -215,7 +218,7 @@ where
             match job {
                 QueueJob::New(job) => {
                     JobCache::insert_new(
-                        &db,
+                        &mut db,
                         job.num_attempts as i32,
                         &job.request.hash()?,
                         job.platform.clone(),
@@ -227,7 +230,7 @@ where
                 }
                 QueueJob::Completed(job) => {
                     JobCache::<P>::update_status_by_hash(
-                        &db,
+                        &mut db,
                         &job.request.hash()?,
                         JobStatusDb::Completed,
                         job.num_attempts as i32,
@@ -236,7 +239,7 @@ where
                 }
                 QueueJob::Failed(job) => {
                     JobCache::<P>::update_status_by_hash(
-                        &db,
+                        &mut db,
                         &job.request.hash()?,
                         JobStatusDb::Failed,
                         job.num_attempts as i32,
@@ -245,7 +248,7 @@ where
                 }
                 QueueJob::Retry(job) => {
                     JobCache::<P>::update_status_by_hash(
-                        &db,
+                        &mut db,
                         &job.request.hash()?,
                         JobStatusDb::Active,
                         job.num_attempts as i32,
@@ -266,9 +269,9 @@ where
     ) -> Result<()> {
         debug!("Starting dequeue loop");
         const TARGET_CIRCULATION: i32 = 10;
-        /// Negative circulation means that we are waiting for jobs to arrive.
-        /// Zero circulation means that we are in equilibrium and all workers are busy.
-        /// Positive circulation means that we are waiting for workers to complete jobs in the channel.
+        // Negative circulation means that we are waiting for jobs to arrive.
+        // Zero circulation means that we are in equilibrium and all workers are busy.
+        // Positive circulation means that we are waiting for workers to complete jobs in the channel.
         let mut current_circulation = -(worker_config.target_circulation as i32);
         let balance = |circulation: &mut i32| -> Result<()> {
             if *circulation < TARGET_CIRCULATION {

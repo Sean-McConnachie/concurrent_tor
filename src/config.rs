@@ -2,12 +2,6 @@ use crate::{execution::scheduler::PlatformT, Result};
 use serde::Deserialize;
 use std::{collections::HashMap, hash::Hash};
 
-#[derive(Deserialize, Debug)]
-pub struct DatabaseConfig {
-    pub maximum_connections: u32,
-    pub url: String,
-}
-
 #[derive(Deserialize, Clone, Debug)]
 pub struct WorkerConfig {
     pub target_circulation: u32,
@@ -39,7 +33,6 @@ pub struct ScraperConfig<P>
 where
     P: 'static + Hash + Eq,
 {
-    pub database: DatabaseConfig,
     pub workers: WorkerConfig,
     pub http_platforms: HashMap<P, HttpPlatformConfig>,
     pub browser_platforms: HashMap<P, BrowserPlatformConfig>,

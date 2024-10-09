@@ -1,23 +1,20 @@
+use crate::{
+    config::HttpPlatformConfig,
+    execution::scheduler::{Job, MainTorClient, NotRequested, QueueJob, QueueJobStatus, Requested},
+    Result,
+};
 use arti_client::TorClient;
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 use crossbeam::channel::{Receiver, Sender};
 use http_body_util::{BodyExt, Empty};
-use hyper::body::Bytes;
-use hyper::http::uri::Scheme;
-use hyper::{Method, Request, StatusCode, Uri};
+use hyper::{body::Bytes, http::uri::Scheme, Method, Request, StatusCode, Uri};
 use hyper_util::rt::TokioIo;
 use log::debug;
 use std::collections::HashMap;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_native_tls::native_tls::TlsConnector;
 use tor_rtcompat::PreferredRuntime;
-
-use crate::config::HttpPlatformConfig;
-use crate::execution::scheduler::{
-    Job, MainTorClient, NotRequested, QueueJob, QueueJobStatus, Requested,
-};
-use crate::Result;
 
 use super::scheduler::PlatformT;
 
@@ -28,11 +25,12 @@ pub trait HttpPlatformBuilder<P: PlatformT> {
 
 #[async_trait]
 pub trait HttpPlatform<P: PlatformT>: Send {
+    /// Function should not fail when passed back to the API. Therefore, it should handle all errors itself.
     fn process_job(
         &self,
         job: Job<NotRequested, P>,
         client: &TorClient<PreferredRuntime>,
-    ) -> Result<Vec<QueueJob<P>>>;
+    ) -> Vec<QueueJob<P>>;
 }
 
 #[derive(Debug)]
@@ -91,12 +89,9 @@ where
         self.last_request = Utc::now();
     }
 
-    fn reset(self) -> Self {
-        HttpPlatformData {
-            last_request: Utc.timestamp_opt(0, 0).unwrap(),
-            requests: 0,
-            ..self
-        }
+    fn reset(&mut self) {
+        self.last_request = Utc.timestamp_opt(0, 0).unwrap();
+        self.requests = 0;
     }
 }
 
@@ -158,7 +153,8 @@ where
             match platform.can_request() {
                 HttpPlatformBehaviourError::Ok => {
                     debug!("Processing job for http worker {}", self.worker_id);
-                    let jobs = platform.platform_impl.process_job(job, &self.client)?;
+                    let jobs = platform.platform_impl.process_job(job, &self.client);
+                    platform.request_complete();
                     for job in jobs {
                         self.queue_job.send(job)?;
                     }
@@ -175,14 +171,20 @@ where
                     self.requeue_job.send(job)?;
                     // Renew the client so we get a new IP
                     self = self.renew_client()?;
+                    // Reset all platforms so we can make more requests
+                    for (_, platform) in self.platforms.iter_mut() {
+                        platform.reset();
+                    }
                 }
             }
+            self.request_job.send(QueueJobStatus::WorkerCompleted {
+                worker_id: self.worker_id,
+            })?;
         }
     }
 
-    async fn make_request(
+    pub async fn make_request(
         client: &TorClient<PreferredRuntime>,
-        // &self,
         uri: &Uri,
         method: Method,
         headers: Option<HashMap<String, String>>,
@@ -206,7 +208,7 @@ where
         }
     }
 
-    async fn query_request(
+    pub async fn query_request(
         host: &str,
         headers: Option<HashMap<String, String>>,
         method: Method,
