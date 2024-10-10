@@ -1,6 +1,6 @@
-pub mod browser;
-pub mod cron;
-pub mod http;
+pub mod ip_browser;
+pub mod ip_cron;
+pub mod ip_http;
 
 use concurrent_tor::{
     execution::scheduler::{PlatformT, WorkerRequest},
@@ -18,8 +18,8 @@ pub enum Platform {
 impl PlatformT for Platform {
     fn request_from_json(&self, json: &str) -> Result<Box<dyn WorkerRequest>> {
         match self {
-            Platform::IpHttp => http::IpHttpRequest::from_json(json),
-            Platform::IpBrowser => browser::IpBrowserRequest::from_json(json),
+            Platform::IpHttp => ip_http::IpHttpRequest::from_json(json),
+            Platform::IpBrowser => ip_browser::IpBrowserRequest::from_json(json),
         }
     }
 

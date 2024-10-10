@@ -9,7 +9,7 @@ use concurrent_tor::{
 use serde::{Deserialize, Serialize};
 use std::{any::Any, io::Cursor};
 
-use crate::platforms::Platform;
+use crate::{platforms::Platform, Client};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IpHttpRequest {
@@ -46,11 +46,11 @@ impl IpHttp {
 }
 
 #[async_trait]
-impl HttpPlatform<Platform> for IpHttp {
+impl HttpPlatform<Platform, Client> for IpHttp {
     fn process_job(
         &self,
         job: Job<NotRequested, Platform>,
-        client: &TorClient<TorRuntime>,
+        client: &Client,
     ) -> Vec<QueueJob<Platform>> {
         let job: &IpHttpRequest = job.request.as_any().downcast_ref().unwrap();
         println!("IpHttp job response: {:?}", job);
@@ -66,12 +66,12 @@ impl IpHttpBuilder {
     }
 }
 
-impl HttpPlatformBuilder<Platform> for IpHttpBuilder {
+impl HttpPlatformBuilder<Platform, Client> for IpHttpBuilder {
     fn platform(&self) -> Platform {
         Platform::IpHttp
     }
 
-    fn build(&self) -> Box<dyn HttpPlatform<Platform>> {
+    fn build(&self) -> Box<dyn HttpPlatform<Platform, Client>> {
         Box::new(IpHttp::new())
     }
 }

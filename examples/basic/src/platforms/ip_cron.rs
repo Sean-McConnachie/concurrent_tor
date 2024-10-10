@@ -9,7 +9,7 @@ use concurrent_tor::{
 use std::time::Duration;
 use tokio::time::sleep;
 
-use crate::platforms::{http::IpHttpRequest, Platform};
+use crate::platforms::{ip_http::IpHttpRequest, Platform};
 
 const IP_HTTP_URL: &str = "https://api.ipify.org?format=json";
 const IP_BROWSER_URL: &str = "https://whatismyipaddress.com/";
