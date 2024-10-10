@@ -13,7 +13,7 @@ use crate::platforms::Platform;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IpHttpRequest {
-    url: String,
+    pub url: String,
 }
 
 impl IpHttpRequest {

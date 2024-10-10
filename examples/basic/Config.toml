@@ -1,8 +1,8 @@
 
 [workers]
 target_circulation = 10
-http_workers = 2
-browser_workers = 2
+http_workers = 1
+browser_workers = 0
 
 [http_platforms]
 

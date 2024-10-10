@@ -158,6 +158,9 @@ where
                     for job in jobs {
                         self.queue_job.send(job)?;
                     }
+                    self.request_job.send(QueueJobStatus::WorkerCompleted {
+                        worker_id: self.worker_id,
+                    })?;
                 }
                 HttpPlatformBehaviourError::MustWait => {
                     debug!("Rate limiting for http worker {}", self.worker_id);
@@ -177,9 +180,6 @@ where
                     }
                 }
             }
-            self.request_job.send(QueueJobStatus::WorkerCompleted {
-                worker_id: self.worker_id,
-            })?;
         }
     }
 

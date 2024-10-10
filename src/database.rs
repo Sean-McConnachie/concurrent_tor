@@ -102,7 +102,7 @@ where
 }
 
 pub async fn connect_and_init_db() -> Result<DB> {
-    const DATASE_FP: &str = "scraper.db";
+    const DATASE_FP: &str = "concurrent_tor.sqlite3";
     let options = SqliteConnectOptions::new()
         .filename(DATASE_FP)
         .create_if_missing(true);

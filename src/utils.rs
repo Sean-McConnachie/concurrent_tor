@@ -3,8 +3,11 @@ use crate::execution::{
     scheduler::PlatformT,
 };
 
-pub fn cron_box<T: CronPlatform + 'static>(builder: T) -> Box<dyn CronPlatform> {
-    Box::new(builder) as Box<dyn CronPlatform>
+pub fn cron_box<T: CronPlatform<P> + 'static, P>(builder: T) -> Box<dyn CronPlatform<P>>
+where
+    P: PlatformT,
+{
+    Box::new(builder) as Box<dyn CronPlatform<P>>
 }
 
 pub fn http_box<T: HttpPlatformBuilder<P> + 'static, P>(

@@ -17,11 +17,11 @@ use crossbeam::channel::unbounded;
 use log::info;
 use std::collections::HashMap;
 
-pub async fn run_scraper_runtime<T: Scheduler<P>, P: PlatformT>(
+pub async fn run_scraper_runtime<S: Scheduler<P>, P: PlatformT>(
     worker_config: WorkerConfig,
-    scheduler: T,
+    scheduler: S,
 
-    cron_platforms: Vec<Box<dyn CronPlatform>>,
+    mut cron_platforms: Vec<Box<dyn CronPlatform<P>>>,
 
     tor_client_config: TorClientConfig,
     http_platform_configs: HashMap<P, HttpPlatformConfig>,
@@ -37,6 +37,11 @@ pub async fn run_scraper_runtime<T: Scheduler<P>, P: PlatformT>(
 
     let (http_worker_tx, http_worker_rx) = unbounded::<Job<NotRequested, P>>();
     let (browser_worker_tx, browser_worker_rx) = unbounded::<Job<NotRequested, P>>();
+
+    // Cron platforms
+    for platform in cron_platforms.iter_mut() {
+        platform.set_queue_job(queue_job_tx.clone());
+    }
 
     // Build JobDistributor
     let job_distributor = {

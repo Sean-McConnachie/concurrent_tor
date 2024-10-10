@@ -115,6 +115,7 @@ where
     }
 }
 
+#[derive(Debug)]
 pub enum QueueJob<P: PlatformT> {
     New(Job<NotRequested, P>),
     Completed(Job<Requested, P>),
@@ -285,7 +286,6 @@ where
         };
         loop {
             let status = request_job.recv()?;
-            debug!("Received job status: {:?}", status);
             match status {
                 QueueJobStatus::NewJobArrived => {
                     balance(&mut current_circulation)?;
