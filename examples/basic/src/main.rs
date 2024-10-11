@@ -1,7 +1,6 @@
 use concurrent_tor::{
-    config::ScraperConfig,
+    config::{BrowserPlatformConfig, HttpPlatformConfig, ScraperConfig, WorkerConfig},
     execution::{
-        monitor::EmptyMonitor,
         runtime::CTRuntime,
         scheduler::{PlatformT, SimpleScheduler, WorkerRequest},
     },
@@ -11,7 +10,28 @@ use concurrent_tor::{
 use local_client::*;
 use log::info;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
+const SERVER_ADDR: (&str, u16) = ("127.0.0.1", 8080);
+const SERVER_WORKERS: usize = 4;
+
+macro_rules! hashmap {
+    () => {
+        std::collections::HashMap::new()
+    };
+
+    ($($key:expr => $val:expr),* $(,)?) => {
+        {
+            let mut map = std::collections::HashMap::new();
+            $(
+                map.insert($key, $val);
+            )*
+            map
+        }
+    };
+}
+
+#[allow(dead_code)]
 mod local_client {
     use concurrent_tor::{
         execution::client::{CStandardClient, MainCStandardClient},
@@ -25,6 +45,7 @@ mod local_client {
     }
 }
 
+#[allow(dead_code)]
 mod tor_client {
     use concurrent_tor::{
         execution::client::{CTorClient, MainCTorClient},
@@ -63,7 +84,10 @@ impl PlatformT for Platform {
 }
 
 mod cron {
-    use super::{browser::IpBrowserRequest, Platform};
+    use super::{Platform, SERVER_ADDR};
+    use crate::browser::IpBrowserRequest;
+    use crate::http::IpHttpRequest;
+    use concurrent_tor::execution::scheduler::NotRequested;
     use concurrent_tor::{
         execution::{
             cron::{CronPlatform, CronPlatformBuilder},
@@ -72,55 +96,77 @@ mod cron {
         exports::{async_trait, CrossbeamSender},
         Result,
     };
+    use log::info;
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
     use std::time::Duration;
-    use tokio::time::sleep;
 
-    const IP_HTTP_URL: &str = "https://api.ipify.org?format=json";
-    const IP_BROWSER_URL: &str = "https://whatismyipaddress.com/";
-
-    pub struct IpCron {
+    pub struct Cron {
+        sleep_ms: u64,
         queue_job: CrossbeamSender<QueueJob<Platform>>,
         stop_flag: Arc<AtomicBool>,
     }
 
+    impl Cron {
+        fn build_http_job(&self) -> Job<NotRequested, Platform> {
+            let req = IpHttpRequest {
+                url: format!("http://{}:{}/post", SERVER_ADDR.0, SERVER_ADDR.1),
+            };
+            Job::init(Platform::IpHttp, Box::new(req))
+        }
+
+        fn build_browser_job(&self) -> Job<NotRequested, Platform> {
+            let req = IpBrowserRequest {
+                url: format!("http://{}:{}/get/", SERVER_ADDR.0, SERVER_ADDR.1),
+            };
+            Job::init(Platform::IpBrowser, Box::new(req))
+        }
+    }
+
     #[async_trait]
-    impl CronPlatform<Platform> for IpCron {
+    impl CronPlatform<Platform> for Cron {
         async fn start(self: Box<Self>) -> Result<()> {
+            // let h = tokio::task::spawn_blocking(move || {
             loop {
                 if self.stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
                     break;
                 }
 
-                let req = IpBrowserRequest {
-                    url: IP_HTTP_URL.to_string(),
-                };
-                let job = Job::init(Platform::IpBrowser, Box::new(req));
-                let job = QueueJob::New(job);
+                let job = QueueJob::New(self.build_http_job());
+                println!("HttpCron job: {:?}", job);
                 self.queue_job.send(job).expect("Failed to send job");
-                println!("IpCron job sent");
-                sleep(Duration::from_millis(300)).await;
+                info!("IpCron job sent");
+
+                // sleep(Duration::from_millis(self.sleep_ms)).await;
+
+                // let job = QueueJob::New(self.build_browser_job());
+                // self.queue_job.send(job).expect("Failed to send job");
+                // info!("IpCron job sent");
+
+                tokio::time::sleep(Duration::from_millis(self.sleep_ms)).await;
+                // std::thread::sleep(Duration::from_millis(self.sleep_ms));
             }
             Ok(())
         }
     }
 
-    pub struct IpCronBuilder {
+    pub struct MyCronBuilder {
+        sleep_ms: u64,
         queue_job: Option<CrossbeamSender<QueueJob<Platform>>>,
         stop_flag: Option<Arc<AtomicBool>>,
     }
 
-    impl IpCronBuilder {
-        pub fn new() -> Self {
+    impl MyCronBuilder {
+        pub fn new(sleep_ms: u64) -> Self {
             Self {
+                sleep_ms,
                 queue_job: None,
                 stop_flag: None,
             }
         }
     }
 
-    impl CronPlatformBuilder<Platform> for IpCronBuilder {
+    impl CronPlatformBuilder<Platform> for MyCronBuilder {
         fn set_queue_job(&mut self, queue_job: CrossbeamSender<QueueJob<Platform>>) {
             self.queue_job = Some(queue_job);
         }
@@ -130,7 +176,8 @@ mod cron {
         }
 
         fn build(&self) -> Box<dyn CronPlatform<Platform>> {
-            Box::new(IpCron {
+            Box::new(Cron {
+                sleep_ms: self.sleep_ms,
                 queue_job: self.queue_job.clone().unwrap(),
                 stop_flag: self.stop_flag.clone().unwrap(),
             })
@@ -140,6 +187,8 @@ mod cron {
 
 mod http {
     use super::{ClientBackend, Platform};
+    use crate::server::JobPost;
+    use concurrent_tor::execution::client::Client;
     use concurrent_tor::{
         execution::{
             http::{HttpPlatform, HttpPlatformBuilder},
@@ -193,24 +242,35 @@ mod http {
             client: &ClientBackend,
         ) -> Vec<QueueJob<Platform>> {
             let job: &IpHttpRequest = job.request.as_any().downcast_ref().unwrap();
-            println!("IpHttp job response: {:?}", job);
-            // client
-            //     .make_request(HttpMethod::GET, &job.url, None)
-            //     .await
-            //     .unwrap();
+            // println!("IpHttp job response: {:?}", job);
+            let job_post = JobPost {
+                hash: job.hash().expect("Unable to hash").to_string(),
+            };
+            let body = Some(json_to_string(&job_post).unwrap());
+            client
+                .make_request(
+                    HttpMethod::POST,
+                    &job.url,
+                    Some(hashmap!(
+                        "Content-Type".to_string() => "application/json".to_string()
+                    )),
+                    body,
+                )
+                .await
+                .unwrap();
             vec![]
         }
     }
 
-    pub struct IpHttpBuilder {}
+    pub struct MyHttpBuilder {}
 
-    impl IpHttpBuilder {
+    impl MyHttpBuilder {
         pub fn new() -> Self {
             Self {}
         }
     }
 
-    impl HttpPlatformBuilder<Platform, ClientBackend> for IpHttpBuilder {
+    impl HttpPlatformBuilder<Platform, ClientBackend> for MyHttpBuilder {
         fn platform(&self) -> Platform {
             Platform::IpHttp
         }
@@ -277,28 +337,29 @@ mod browser {
             tab: Arc<headless_chrome::Tab>,
         ) -> Vec<QueueJob<Platform>> {
             let job: &IpBrowserRequest = job.request.as_any().downcast_ref().unwrap();
-            println!("IpBrowser job response: {:?}", job);
+            // println!("IpBrowser job response: {:?}", job);
             let url = job.url.clone();
+            let url = format!("{}{}", url, job.hash().unwrap());
             let handle = tokio::task::spawn_blocking(move || {
                 tab.navigate_to(&url).unwrap();
                 tab.wait_until_navigated().unwrap();
-                let r = tab.get_content().unwrap();
-                println!("Page content: {:?}", r);
+                let _r = tab.get_content().unwrap();
+                // println!("Page content: {:?}", r);
             });
             handle.await.unwrap();
             vec![]
         }
     }
 
-    pub struct IpBrowserBuilder {}
+    pub struct MyBrowserBuilder {}
 
-    impl IpBrowserBuilder {
+    impl MyBrowserBuilder {
         pub fn new() -> Self {
             Self {}
         }
     }
 
-    impl BrowserPlatformBuilder<Platform> for IpBrowserBuilder {
+    impl BrowserPlatformBuilder<Platform> for MyBrowserBuilder {
         fn platform(&self) -> Platform {
             Platform::IpBrowser
         }
@@ -310,17 +371,42 @@ mod browser {
 }
 
 mod monitor {
+    use crate::server::ServerEvent;
     use crate::Platform;
     use concurrent_tor::{
         execution::monitor::{Event, Monitor},
         exports::{async_trait, CrossbeamReceiver},
     };
+    use crossbeam::channel::Receiver;
 
-    pub struct MyMonitor {}
+    pub struct MyMonitor {
+        server_event: Receiver<ServerEvent>,
+    }
 
     impl MyMonitor {
-        pub fn new() -> Self {
-            MyMonitor {}
+        pub fn new(server_event: Receiver<ServerEvent>) -> Self {
+            MyMonitor { server_event }
+        }
+
+        fn start_server_recv(server_event: Receiver<ServerEvent>) {
+            loop {
+                let server_event = server_event
+                    .recv()
+                    .expect("Failed to receive event from the server");
+                println!("Server event: {:?}", server_event);
+            }
+        }
+
+        fn start_ct_recv(event_rx: CrossbeamReceiver<Event<Platform>>) {
+            loop {
+                let ct_event = event_rx
+                    .recv()
+                    .expect("Failed to receive event from the scheduler");
+                if let Event::StopMonitor = ct_event {
+                    break;
+                }
+                println!("Monitor event: {:?}", ct_event);
+            }
         }
     }
 
@@ -330,15 +416,132 @@ mod monitor {
             self,
             event_rx: CrossbeamReceiver<Event<Platform>>,
         ) -> concurrent_tor::Result<()> {
-            loop {
-                let event = event_rx.recv().unwrap();
-                if let Event::StopMonitor = event {
-                    break;
-                }
-                println!("Monitor event: {:?}", event);
-            }
+            let server_handle = tokio::task::spawn_blocking(move || {
+                MyMonitor::start_server_recv(self.server_event.clone())
+            });
+            let ct_handle =
+                tokio::task::spawn_blocking(move || MyMonitor::start_ct_recv(event_rx.clone()));
+            server_handle.await?;
+            ct_handle.await?;
             Ok(())
         }
+    }
+}
+
+mod server {
+    use actix_web::dev::ServerHandle;
+    use actix_web::http::StatusCode;
+    use actix_web::{get, post, web, App, HttpServer, Responder};
+    use crossbeam::channel::{Receiver, Sender};
+    use log::info;
+    use rand::prelude::SliceRandom;
+    use rand::rngs::OsRng;
+    use serde::{Deserialize, Serialize};
+    use tokio::task::JoinHandle;
+
+    #[derive(Debug)]
+    pub struct JobInfo {
+        pub hash: u128,
+        pub ts: quanta::Instant,
+    }
+
+    impl JobInfo {
+        pub fn new(hash: u128) -> Self {
+            Self {
+                hash,
+                ts: quanta::Instant::now(),
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    #[derive(Debug)]
+    pub enum ServerEvent {
+        InfoSuccess(JobInfo),
+        GetSuccess(JobInfo),
+        InfoFailure(JobInfo),
+        GetFailure(JobInfo),
+    }
+
+    #[derive(Deserialize, Serialize, Debug)]
+    pub struct JobPost {
+        pub hash: String,
+    }
+
+    fn rand_success() -> bool {
+        rand::random()
+    }
+
+    /// Only called by the the browser client
+    #[get("/get/{job_hash}")]
+    async fn get_job(
+        job_hash: web::Path<String>,
+        events: web::Data<Sender<ServerEvent>>,
+    ) -> String {
+        info!("Received GET request for job hash: {}", job_hash);
+        let job_hash: u128 = job_hash.parse().unwrap();
+        let job_info = JobInfo::new(job_hash.clone());
+        if rand_success() {
+            events.send(ServerEvent::GetSuccess(job_info)).unwrap();
+            format!("Job hash: {}", job_hash)
+        } else {
+            events.send(ServerEvent::GetFailure(job_info)).unwrap();
+            format!("Failed to get job hash: {}", job_hash)
+        }
+    }
+
+    /// Only called by the the http client
+    #[post("/post")]
+    async fn post_job(
+        job: web::Json<JobPost>,
+        events: web::Data<Sender<ServerEvent>>,
+    ) -> impl Responder {
+        info!("Received POST request for job hash: {}", job.hash);
+        let job_hash: u128 = job.hash.parse().unwrap();
+        let job_info = JobInfo::new(job_hash.clone());
+        if rand_success() {
+            events.send(ServerEvent::InfoSuccess(job_info)).unwrap();
+            let choices = vec![StatusCode::OK, StatusCode::CREATED, StatusCode::ACCEPTED];
+            (
+                "success".to_string(),
+                choices.choose(&mut OsRng::default()).unwrap().clone(),
+            )
+        } else {
+            events.send(ServerEvent::InfoFailure(job_info)).unwrap();
+            let choices = vec![
+                StatusCode::BAD_REQUEST,
+                StatusCode::FORBIDDEN,
+                StatusCode::NOT_FOUND,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ];
+            (
+                "fail".to_string(),
+                choices.choose(&mut OsRng::default()).unwrap().clone(),
+            )
+        }
+    }
+
+    pub async fn start_server(
+        addr: (&str, u16),
+        workers: usize,
+    ) -> std::io::Result<(
+        ServerHandle,
+        JoinHandle<std::io::Result<()>>,
+        Receiver<ServerEvent>,
+    )> {
+        let (event_tx, event_rx) = crossbeam::channel::unbounded::<ServerEvent>();
+        let server = HttpServer::new(move || {
+            App::new()
+                .service(get_job)
+                .service(post_job)
+                .app_data(web::Data::new(event_tx.clone()))
+        })
+        .bind(addr)?
+        .workers(workers)
+        .run();
+        let handle = server.handle();
+        let join = tokio::task::spawn(server);
+        Ok((handle, join, event_rx))
     }
 }
 
@@ -348,26 +551,55 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     info!("Starting up");
 
-    let config = ScraperConfig::init("Config.toml")?;
-    let rt = CTRuntime::run_scraper_runtime(
-        config.workers,
-        monitor::MyMonitor::new(),
+    let db_path = PathBuf::from("concurrent_tor.sqlite3");
+    if db_path.exists() {
+        std::fs::remove_file(&db_path)?;
+    }
+
+    let (server_handle, server_join, server_events) =
+        server::start_server(SERVER_ADDR, SERVER_WORKERS).await?;
+
+    let send_req_timeout_ms = 500;
+    let ct_config = ScraperConfig {
+        workers: WorkerConfig {
+            target_circulation: 10,
+            http_workers: 1,
+            browser_workers: 0,
+        },
+        http_platforms: hashmap!(
+            Platform::IpHttp => HttpPlatformConfig {
+                max_requests: 10,
+                timeout_ms: 0,
+            }
+        ),
+        browser_platforms: hashmap!(
+            Platform::IpBrowser => BrowserPlatformConfig {
+                max_requests: 10,
+                timeout_ms: 0,
+            }
+        ),
+    };
+    let rt = CTRuntime::run(
+        ct_config.workers,
+        monitor::MyMonitor::new(server_events),
         SimpleScheduler::new(),
         build_main_client().await?,
-        vec![cron_box(cron::IpCronBuilder::new())],
-        config.http_platforms,
-        vec![http_box(http::IpHttpBuilder::new())],
-        config.browser_platforms,
-        vec![browser_box(browser::IpBrowserBuilder::new())],
+        vec![cron_box(cron::MyCronBuilder::new(send_req_timeout_ms))],
+        ct_config.http_platforms,
+        vec![http_box(http::MyHttpBuilder::new())],
+        ct_config.browser_platforms,
+        vec![browser_box(browser::MyBrowserBuilder::new())],
     )
     .await?;
 
     let stop = rt.graceful_stop();
     tokio::task::spawn(async move {
-        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
         stop().expect("Failed to stop runtime");
     });
 
     rt.join().await?;
+    server_handle.stop(true).await;
+    server_join.await??;
     Ok(())
 }

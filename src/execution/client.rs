@@ -4,6 +4,7 @@ use arti::socks::run_socks_proxy;
 use arti_client::{TorClient, TorClientConfig};
 use async_trait::async_trait;
 use http_body_util::{BodyExt, Empty};
+use hyper::body::Body;
 use hyper::{body::Bytes, http::uri::Scheme, Method, Request, Uri};
 use hyper_util::rt::TokioIo;
 use log::{debug, error};
@@ -30,6 +31,7 @@ pub trait Client: Send + Sync {
         method: Method,
         uri: &str,
         headers: Option<HashMap<String, String>>,
+        body: Option<String>,
     ) -> Result<HttpResponse>;
 }
 
@@ -49,33 +51,48 @@ pub struct CTorClient {
 }
 
 impl CTorClient {
-    async fn query_request(
+    async fn build_request(
         host: &str,
         headers: Option<HashMap<String, String>>,
         method: Method,
         stream: impl AsyncRead + AsyncWrite + Unpin + Send + 'static,
+        body: Option<String>,
     ) -> Result<HttpResponse> {
-        let (mut request_sender, connection) =
-            hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
-
-        tokio::spawn(async move { connection.await });
-
         let mut request = Request::builder().header("Host", host).method(method);
         if let Some(headers) = headers {
             for (key, value) in headers.iter() {
                 request = request.header(key, value);
             }
         }
+        if let Some(body) = body {
+            let req = request.body(body)?;
+            Self::query_request(stream, req).await
+        } else {
+            let req = request.body(Empty::<Bytes>::new())?;
+            Self::query_request(stream, req).await
+        }
+    }
 
-        let mut resp = request_sender
-            .send_request(request.body(Empty::<Bytes>::new()).unwrap())
-            .await?;
+    async fn query_request<T: Body + Send + 'static>(
+        stream: impl AsyncRead + AsyncWrite + Unpin + Send + 'static,
+        request: Request<T>,
+    ) -> Result<HttpResponse>
+    where
+        <T as Body>::Data: Send + 'static,
+        <T as Body>::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        let (mut request_sender, connection) =
+            hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
+        tokio::spawn(async move { connection.await });
 
+        let mut resp = request_sender.send_request(request).await?;
         let mut full_body = Vec::new();
+
         while let Some(frame) = resp.body_mut().frame().await {
             let bytes = frame?.into_data().unwrap();
             full_body.extend_from_slice(&bytes);
         }
+
         let body = String::from_utf8(full_body).unwrap();
         Ok(HttpResponse {
             status: resp.status(),
@@ -107,6 +124,7 @@ impl Client for CTorClient {
         method: Method,
         uri: &str,
         headers: Option<HashMap<String, String>>,
+        body: Option<String>,
     ) -> Result<HttpResponse> {
         let uri = Uri::from_str(uri).map_err(|e| anyhow!("Failed to parse URI: {:?}", e))?;
         let host = uri.host().unwrap();
@@ -122,9 +140,9 @@ impl Client for CTorClient {
             let cx = TlsConnector::builder().build()?;
             let cx = tokio_native_tls::TlsConnector::from(cx);
             let stream = cx.connect(host, stream).await?;
-            Self::query_request(host, headers, method, stream).await
+            Self::build_request(host, headers, method, stream, body).await
         } else {
-            Self::query_request(host, headers, method, stream).await
+            Self::build_request(host, headers, method, stream, body).await
         }
     }
 }
@@ -173,6 +191,7 @@ impl Client for CStandardClient {
         method: Method,
         uri: &str,
         headers: Option<HashMap<String, String>>,
+        body: Option<String>,
     ) -> Result<HttpResponse> {
         let url = Url::parse(uri).map_err(|e| anyhow!("Failed to parse URI: {:?}", e))?;
         let mut request = self.client.request(method, url);
@@ -181,6 +200,10 @@ impl Client for CStandardClient {
                 request = request.header(key, value);
             }
         }
+        if let Some(body) = body {
+            request = request.body(body);
+        }
+
         let resp = self.client.execute(request.build()?).await?;
         let status = resp.status();
         let headers = resp

@@ -373,27 +373,31 @@ where
         // Positive circulation means that we are waiting for workers to complete jobs in the channel.
         let mut current_circulation = -(worker_config.target_circulation as i32);
         let balance = |circulation: &mut i32| -> Result<()> {
-            let mut lock = scheduler.lock().unwrap();
+            // let mut lock = scheduler.lock().unwrap();
             monitor.send(Event::BalanceCirculation(DequeueInfo::new(
                 *circulation,
-                lock.size(),
+                scheduler.lock().unwrap().size(),
                 http_tx.len(),
                 browser_tx.len(),
                 quanta::Instant::now(),
             )))?;
             if *circulation < TARGET_CIRCULATION {
-                if let Some(job) = lock.dequeue() {
+                println!("should dequeue");
+                if let Some(job) = scheduler.lock().unwrap().dequeue() {
+                    println!("Dequeued job");
                     let sender = dequeue_job.get(&job.platform).unwrap();
                     sender.send(WorkerAction::Job(job)).map_err(|e| {
                         anyhow!("Failed to send job to worker in dequeue loop: {:?}", e)
                     })?;
                     *circulation += 1;
+                    println!("Circulation: {}", *circulation);
                 }
             }
             Ok(())
         };
         loop {
             let status = request_job.recv()?;
+            println!("Status: {:?}", status);
             match status {
                 QueueJobStatus::NewJobArrived => {
                     balance(&mut current_circulation)?;

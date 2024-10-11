@@ -13,7 +13,6 @@ use crate::{
 };
 use anyhow::anyhow;
 use async_trait::async_trait;
-use chrono::{DateTime, TimeZone, Utc};
 use crossbeam::channel::{Receiver, Sender};
 use hyper::StatusCode;
 use log::{debug, info};

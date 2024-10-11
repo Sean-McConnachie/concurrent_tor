@@ -10,4 +10,11 @@ tracing-subscriber = "0.3.18"
 tokio = { version = "1.10.0", features = ["rt-multi-thread", "macros"] }
 log = "0.4.22"
 serde = { version = "1.0", features = ["derive"] }
+
 actix-web = "4"
+anyhow = "1.0.89"
+serde_json = "1.0"
+futures = "0.3"
+crossbeam = "0.8.4"
+quanta = "0.12.3"
+rand = "0.8.5"

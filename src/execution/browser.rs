@@ -11,7 +11,6 @@ use crate::{
 };
 use anyhow::anyhow;
 use async_trait::async_trait;
-use chrono::{DateTime, TimeZone, Utc};
 use crossbeam::channel::{Receiver, Sender};
 use headless_chrome::{Browser, LaunchOptions, Tab};
 use log::{debug, info};

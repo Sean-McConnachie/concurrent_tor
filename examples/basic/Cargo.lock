@@ -634,10 +634,16 @@ name = "basic"
 version = "0.1.0"
 dependencies = [
  "actix-web",
+ "anyhow",
  "concurrent_tor",
+ "crossbeam",
  "dotenv",
+ "futures",
  "log",
+ "quanta",
+ "rand",
  "serde",
+ "serde_json",
  "tokio",
  "tracing-subscriber",
 ]

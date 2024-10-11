@@ -33,7 +33,7 @@ impl<P> CTRuntime<P>
 where
     P: PlatformT,
 {
-    pub async fn run_scraper_runtime<
+    pub async fn run<
         S: Scheduler<P>,
         C: Client + 'static,
         M: MainClient<C> + 'static,
