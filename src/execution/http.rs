@@ -2,15 +2,18 @@ use crate::{
     config::HttpPlatformConfig,
     execution::{
         client::{Client, MainClient},
-        scheduler::{Job, NotRequested, PlatformT, QueueJob, QueueJobStatus, Requested},
+        scheduler::{
+            Job, NotRequested, PlatformT, QueueJob, QueueJobStatus, Requested, WorkerAction,
+        },
     },
     Result,
 };
+use anyhow::anyhow;
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 use crossbeam::channel::{Receiver, Sender};
 use hyper::StatusCode;
-use log::debug;
+use log::{debug, info};
 use std::collections::HashMap;
 
 pub trait HttpPlatformBuilder<P: PlatformT, C: Client> {
@@ -92,9 +95,9 @@ pub struct HttpWorker<P: PlatformT, C: Client, M: MainClient<C>> {
     /// Request job from a queue
     request_job: Sender<QueueJobStatus>,
     /// Receive job from a queue
-    recv_job: Receiver<Job<NotRequested, P>>,
+    recv_job: Receiver<WorkerAction<P>>,
     /// Add job back to queue if the worker is unable to process it (possibly due to rate limiting)
-    requeue_job: Sender<Job<NotRequested, P>>,
+    requeue_job: Sender<WorkerAction<P>>,
     /// Add a new, or existing job to the queue
     queue_job: Sender<QueueJob<P>>,
     /// Tor client to make requests
@@ -114,8 +117,8 @@ where
     pub fn new(
         worker_id: u32,
         request_job: Sender<QueueJobStatus>,
-        recv_job: Receiver<Job<NotRequested, P>>,
-        requeue_job: Sender<Job<NotRequested, P>>,
+        recv_job: Receiver<WorkerAction<P>>,
+        requeue_job: Sender<WorkerAction<P>>,
         queue_job: Sender<QueueJob<P>>,
         main_client: M,
         platforms: HashMap<P, HttpPlatformData<P, C>>,
@@ -142,7 +145,14 @@ where
     pub(crate) async fn start(mut self) -> Result<()> {
         debug!("Starting worker {}", self.worker_id);
         loop {
-            let job = self.recv_job.recv()?;
+            let action = self.recv_job.recv()?;
+            let job = match action {
+                WorkerAction::Job(job) => job,
+                WorkerAction::StopProgram => {
+                    info!("Stopping http worker {}", self.worker_id);
+                    break;
+                }
+            };
             let platform = self.platforms.get_mut(&job.platform).unwrap();
             match platform.can_request() {
                 HttpPlatformBehaviourError::Ok => {
@@ -150,22 +160,48 @@ where
                     let jobs = platform.platform_impl.process_job(job, &self.client).await;
                     platform.request_complete();
                     for job in jobs {
-                        self.queue_job.send(job)?;
+                        self.queue_job.send(job).map_err(|e| {
+                            anyhow!(
+                                "Failed to send job to queue in http worker {}: {:?}",
+                                self.worker_id,
+                                e
+                            )
+                        })?;
                     }
-                    self.request_job.send(QueueJobStatus::WorkerCompleted {
-                        worker_id: self.worker_id,
-                    })?;
+                    self.request_job
+                        .send(QueueJobStatus::WorkerCompleted {
+                            worker_id: self.worker_id,
+                        })
+                        .map_err(|e| {
+                            anyhow!(
+                                "Failed to send worker completed status in http worker {}: {:?}",
+                                self.worker_id,
+                                e
+                            )
+                        })?;
                 }
                 HttpPlatformBehaviourError::MustWait => {
                     debug!("Rate limiting for http worker {}", self.worker_id);
                     // Return the job so another worker can process it, or we can retry later
                     // TODO: Add sleep?
-                    self.requeue_job.send(job)?;
+                    self.requeue_job.send(WorkerAction::Job(job)).map_err(|e| {
+                        anyhow!(
+                            "Failed to requeue job in http worker {}: {:?}",
+                            self.worker_id,
+                            e
+                        )
+                    })?;
                 }
                 HttpPlatformBehaviourError::MaxRequests => {
                     debug!("Max requests for http worker {}", self.worker_id);
                     // Return the job so another worker can process it, or we can retry later
-                    self.requeue_job.send(job)?;
+                    self.requeue_job.send(WorkerAction::Job(job)).map_err(|e| {
+                        anyhow!(
+                            "Failed to requeue job in http worker {}: {:?}",
+                            self.worker_id,
+                            e
+                        )
+                    })?;
                     // Renew the client so we get a new IP
                     self = self.renew_client()?;
                     // Reset all platforms so we can make more requests
@@ -175,5 +211,6 @@ where
                 }
             }
         }
+        Ok(())
     }
 }

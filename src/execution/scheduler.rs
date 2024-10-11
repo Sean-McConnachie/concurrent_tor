@@ -3,8 +3,9 @@ use crate::{
     database::{JobCache, JobStatusDb, DB},
     Result,
 };
+use anyhow::anyhow;
 use crossbeam::channel::{Receiver, Sender};
-use log::debug;
+use log::{debug, info};
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -97,12 +98,20 @@ where
 }
 
 #[derive(Debug)]
+pub enum WorkerAction<P: PlatformT> {
+    Job(Job<NotRequested, P>),
+    StopProgram,
+}
+
+#[derive(Debug)]
 pub enum QueueJob<P: PlatformT> {
     New(Job<NotRequested, P>),
     Completed(Job<Requested, P>),
     /// Cancel the job and do not retry.
     Failed(Job<Requested, P>),
     Retry(Job<NotRequested, P>),
+    SendStopProgram,
+    StopProgram,
 }
 
 pub trait Scheduler<P: PlatformT>: Send + 'static {
@@ -119,6 +128,8 @@ pub trait Scheduler<P: PlatformT>: Send + 'static {
 pub enum QueueJobStatus {
     WorkerCompleted { worker_id: u32 },
     NewJobArrived,
+    SendStopProgram,
+    StopProgram,
 }
 
 pub struct JobDistributor<S: Scheduler<P>, P: PlatformT> {
@@ -127,10 +138,14 @@ pub struct JobDistributor<S: Scheduler<P>, P: PlatformT> {
     request_job: Receiver<QueueJobStatus>,
     /// Send a signal to dequeue a job.
     notify_new_job: Sender<QueueJobStatus>,
+    /// Used only to send stop signal to http workers.
+    http_tx: Sender<WorkerAction<P>>,
+    /// Used only to send stop signal to browser workers.
+    browser_tx: Sender<WorkerAction<P>>,
     /// Receive job from a platform only.
     queue_job: Receiver<QueueJob<P>>,
     /// Send job to a worker only. HashMap because workers are Http or Browser based, not generic.
-    dequeue_job: HashMap<P, Sender<Job<NotRequested, P>>>,
+    dequeue_job: HashMap<P, Sender<WorkerAction<P>>>,
     scheduler: Arc<Mutex<S>>,
     worker_config: WorkerConfig,
 }
@@ -147,7 +162,9 @@ where
         request_job: Receiver<QueueJobStatus>,
         notify_new_job: Sender<QueueJobStatus>,
         queue_job: Receiver<QueueJob<P>>,
-        dequeue_job: HashMap<P, Sender<Job<NotRequested, P>>>,
+        dequeue_job: HashMap<P, Sender<WorkerAction<P>>>,
+        http_tx: Sender<WorkerAction<P>>,
+        browser_tx: Sender<WorkerAction<P>>,
         scheduler: S,
         worker_config: WorkerConfig,
     ) -> Self {
@@ -157,12 +174,14 @@ where
             notify_new_job,
             queue_job,
             dequeue_job,
+            http_tx,
+            browser_tx,
             scheduler: Arc::new(Mutex::new(scheduler)),
             worker_config,
         }
     }
 
-    pub(super) fn start(self) -> Vec<JoinHandle<Result<()>>> {
+    pub(super) fn start(self) -> [JoinHandle<Result<()>>; 2] {
         let scheduler = self.scheduler.clone();
         let enqueue_thread = tokio::task::spawn(async move {
             Self::loop_enqueue(self.db, self.queue_job, self.notify_new_job, scheduler).await
@@ -171,11 +190,13 @@ where
             Self::loop_dequeue(
                 self.request_job,
                 self.dequeue_job,
+                self.http_tx,
+                self.browser_tx,
                 self.scheduler,
                 self.worker_config,
             )
         });
-        vec![enqueue_thread, dequeue_thread]
+        [enqueue_thread, dequeue_thread]
     }
 
     async fn loop_enqueue(
@@ -192,8 +213,16 @@ where
             let request = job.platform.request_from_json(&job.request)?;
             let job = Job::new(job.platform, request, job.num_attempts as u32);
             scheduler.lock().unwrap().enqueue(job);
-            notify_new_job.send(QueueJobStatus::NewJobArrived)?;
+            notify_new_job
+                .send(QueueJobStatus::NewJobArrived)
+                .map_err(|e| {
+                    anyhow!(
+                        "Failed to send new job arrived signal in loop enqueue: {:?}",
+                        e
+                    )
+                })?;
         }
+        let mut shutting_down = false;
 
         loop {
             let job = queue_job.recv()?;
@@ -207,8 +236,17 @@ where
                         &job.request.as_json(),
                     )
                     .await?;
-                    scheduler.lock().unwrap().enqueue(job);
-                    notify_new_job.send(QueueJobStatus::NewJobArrived)?;
+                    if !shutting_down {
+                        scheduler.lock().unwrap().enqueue(job);
+                        notify_new_job
+                            .send(QueueJobStatus::NewJobArrived)
+                            .map_err(|e| {
+                                anyhow!(
+                                    "Failed to send new job arrived signal in loop enqueue: {:?}",
+                                    e
+                                )
+                            })?;
+                    }
                 }
                 QueueJob::Completed(job) => {
                     JobCache::<P>::update_status_by_hash(
@@ -237,15 +275,48 @@ where
                     )
                     .await?;
                     scheduler.lock().unwrap().enqueue(job);
-                    notify_new_job.send(QueueJobStatus::NewJobArrived)?;
+                    notify_new_job
+                        .send(QueueJobStatus::NewJobArrived)
+                        .map_err(|e| {
+                            anyhow!(
+                                "Failed to send new job arrived signal in loop enqueue: {:?}",
+                                e
+                            )
+                        })?;
+                }
+                QueueJob::SendStopProgram => {
+                    info!("Sending stop signal to dequeue loop");
+                    shutting_down = true;
+                    notify_new_job
+                        .send(QueueJobStatus::SendStopProgram)
+                        .map_err(|e| {
+                            anyhow!(
+                                "Failed to send stop program signal in loop enqueue: {:?}",
+                                e
+                            )
+                        })?;
+                }
+                QueueJob::StopProgram => {
+                    notify_new_job
+                        .send(QueueJobStatus::StopProgram)
+                        .map_err(|e| {
+                            anyhow!(
+                                "Failed to send stop program signal in loop enqueue: {:?}",
+                                e
+                            )
+                        })?;
+                    break;
                 }
             }
         }
+        Ok(())
     }
 
     fn loop_dequeue(
         request_job: Receiver<QueueJobStatus>,
-        dequeue_job: HashMap<P, Sender<Job<NotRequested, P>>>,
+        dequeue_job: HashMap<P, Sender<WorkerAction<P>>>,
+        mut http_tx: Sender<WorkerAction<P>>,
+        mut browser_tx: Sender<WorkerAction<P>>,
         scheduler: Arc<Mutex<S>>,
         worker_config: WorkerConfig,
     ) -> Result<()> {
@@ -259,7 +330,9 @@ where
             if *circulation < TARGET_CIRCULATION {
                 if let Some(job) = scheduler.lock().unwrap().dequeue() {
                     let sender = dequeue_job.get(&job.platform).unwrap();
-                    sender.send(job)?;
+                    sender.send(WorkerAction::Job(job)).map_err(|e| {
+                        anyhow!("Failed to send job to worker in dequeue loop: {:?}", e)
+                    })?;
                     *circulation += 1;
                 }
             }
@@ -277,8 +350,26 @@ where
                     current_circulation -= 1;
                     balance(&mut current_circulation)?;
                 }
+                QueueJobStatus::SendStopProgram => {
+                    info!("Sending stop signal to http workers");
+                    for _http_platform in 0..worker_config.http_workers {
+                        http_tx.send(WorkerAction::StopProgram).map_err(|e| {
+                            anyhow!("Failed to send stop program to http workers: {:?}", e)
+                        })?;
+                    }
+                    info!("Sending stop signal to browser workers");
+                    for _browser_platform in 0..worker_config.browser_workers {
+                        browser_tx.send(WorkerAction::StopProgram).map_err(|e| {
+                            anyhow!("Failed to send stop program to browser workers: {:?}", e)
+                        })?;
+                    }
+                }
+                QueueJobStatus::StopProgram => {
+                    break;
+                }
             }
         }
+        Ok(())
     }
 }
 

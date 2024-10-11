@@ -1,13 +1,15 @@
 use crate::execution::{
-    browser::BrowserPlatformBuilder, client::Client, cron::CronPlatform, http::HttpPlatformBuilder,
-    scheduler::PlatformT,
+    browser::BrowserPlatformBuilder, client::Client, cron::CronPlatformBuilder,
+    http::HttpPlatformBuilder, scheduler::PlatformT,
 };
 
-pub fn cron_box<T: CronPlatform<P> + 'static, P>(builder: T) -> Box<dyn CronPlatform<P>>
+pub fn cron_box<T: CronPlatformBuilder<P> + 'static, P>(
+    builder: T,
+) -> Box<dyn CronPlatformBuilder<P>>
 where
     P: PlatformT,
 {
-    Box::new(builder) as Box<dyn CronPlatform<P>>
+    Box::new(builder) as Box<dyn CronPlatformBuilder<P>>
 }
 
 pub fn http_box<T: HttpPlatformBuilder<P, C> + 'static, P, C>(

@@ -4,152 +4,207 @@ use crate::{
     execution::{
         browser::{BrowserPlatformBuilder, BrowserPlatformData, BrowserWorker},
         client::{Client, MainClient},
-        cron::CronPlatform,
+        cron::{CronPlatform, CronPlatformBuilder},
         http::{HttpPlatformBuilder, HttpPlatformData, HttpWorker},
         scheduler::{
             Job, JobDistributor, NotRequested, PlatformT, QueueJob, QueueJobStatus, Scheduler,
+            WorkerAction,
         },
     },
     Result,
 };
-use crossbeam::channel::unbounded;
+use anyhow::anyhow;
+use crossbeam::channel::{unbounded, Sender};
 use log::info;
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+use tokio::task::JoinHandle;
 
-pub async fn run_scraper_runtime<
-    S: Scheduler<P>,
+pub struct CTRuntime<P: PlatformT> {
+    stop_queue_worker: Sender<QueueJob<P>>,
+    stop_cron_flag: Arc<AtomicBool>,
+    queue_handles: [JoinHandle<Result<()>>; 2],
+    join_handles: Vec<JoinHandle<Result<()>>>,
+}
+
+impl<P> CTRuntime<P>
+where
     P: PlatformT,
-    C: Client + 'static,
-    M: MainClient<C> + 'static,
->(
-    worker_config: WorkerConfig,
-    scheduler: S,
-    main_client: M,
+{
+    pub async fn run_scraper_runtime<
+        S: Scheduler<P>,
+        C: Client + 'static,
+        M: MainClient<C> + 'static,
+    >(
+        worker_config: WorkerConfig,
+        scheduler: S,
+        main_client: M,
 
-    mut cron_platforms: Vec<Box<dyn CronPlatform<P>>>,
+        mut cron_platforms: Vec<Box<dyn CronPlatformBuilder<P>>>,
 
-    http_platform_configs: HashMap<P, HttpPlatformConfig>,
-    http_platforms: Vec<Box<dyn HttpPlatformBuilder<P, C>>>,
+        http_platform_configs: HashMap<P, HttpPlatformConfig>,
+        http_platforms: Vec<Box<dyn HttpPlatformBuilder<P, C>>>,
 
-    browser_platform_configs: HashMap<P, BrowserPlatformConfig>,
-    browser_platforms: Vec<Box<dyn BrowserPlatformBuilder<P>>>,
-) -> Result<()> {
-    let pool = connect_and_init_db().await?;
+        browser_platform_configs: HashMap<P, BrowserPlatformConfig>,
+        browser_platforms: Vec<Box<dyn BrowserPlatformBuilder<P>>>,
+    ) -> Result<Self> {
+        let pool = connect_and_init_db().await?;
 
-    let (request_job_tx, request_job_rx) = unbounded::<QueueJobStatus>();
-    let (queue_job_tx, queue_job_rx) = unbounded::<QueueJob<P>>();
+        let (request_job_tx, request_job_rx) = unbounded::<QueueJobStatus>();
+        let (queue_job_tx, queue_job_rx) = unbounded::<QueueJob<P>>();
 
-    let (http_worker_tx, http_worker_rx) = unbounded::<Job<NotRequested, P>>();
-    let (browser_worker_tx, browser_worker_rx) = unbounded::<Job<NotRequested, P>>();
+        let (http_worker_tx, http_worker_rx) = unbounded::<WorkerAction<P>>();
+        let (browser_worker_tx, browser_worker_rx) = unbounded::<WorkerAction<P>>();
 
-    // Cron platforms
-    for platform in cron_platforms.iter_mut() {
-        platform.set_queue_job(queue_job_tx.clone());
-    }
-
-    // Build JobDistributor
-    let job_distributor = {
-        let mut txs = HashMap::new();
-        for http_platform in http_platforms.iter() {
-            let p = http_platform.platform();
-            txs.insert(http_platform.platform(), http_worker_tx.clone());
-        }
-        for browser_platform in browser_platforms.iter() {
-            let p = browser_platform.platform();
-            txs.insert(browser_platform.platform(), browser_worker_tx.clone());
-        }
-        JobDistributor::new(
-            pool,
-            request_job_rx,
-            request_job_tx.clone(),
-            queue_job_rx,
-            txs,
-            scheduler,
-            worker_config.clone(),
-        )
-    };
-
-    // Build HTTP workers
-    let http_workers = (0..worker_config.http_workers)
-        .map(|worker_id| {
-            let platforms = http_platforms
-                .iter()
-                .map(|builder| {
-                    let platform = builder.platform();
-                    (
-                        platform.clone(),
-                        HttpPlatformData::new(
-                            builder.build(),
-                            http_platform_configs.get(&platform).unwrap().clone(),
-                        ),
-                    )
-                })
-                .collect::<HashMap<_, _>>();
-            HttpWorker::new(
-                worker_id,
+        // Build JobDistributor
+        let job_distributor = {
+            let mut txs = HashMap::new();
+            for http_platform in http_platforms.iter() {
+                let p = http_platform.platform();
+                txs.insert(http_platform.platform(), http_worker_tx.clone());
+            }
+            for browser_platform in browser_platforms.iter() {
+                let p = browser_platform.platform();
+                txs.insert(browser_platform.platform(), browser_worker_tx.clone());
+            }
+            JobDistributor::new(
+                pool,
+                request_job_rx,
                 request_job_tx.clone(),
-                http_worker_rx.clone(),
+                queue_job_rx,
+                txs,
                 http_worker_tx.clone(),
-                queue_job_tx.clone(),
-                main_client.clone(),
-                platforms,
-            )
-        })
-        .collect::<Vec<_>>();
-
-    // Build Browser workers
-    const STARTING_PORT: u16 = 9050;
-    let browser_workers: Vec<BrowserWorker<P, C, M>> = (0..worker_config.browser_workers)
-        .map(|worker_id| {
-            let platforms = browser_platforms
-                .iter()
-                .map(|builder| {
-                    let platform = builder.platform();
-                    (
-                        platform.clone(),
-                        BrowserPlatformData::new(
-                            builder.build(),
-                            browser_platform_configs.get(&platform).unwrap().clone(),
-                        ),
-                    )
-                })
-                .collect::<HashMap<_, _>>();
-            let socks_port = STARTING_PORT + worker_id as u16;
-            BrowserWorker::new(
-                worker_id,
-                request_job_tx.clone(),
-                browser_worker_rx.clone(),
                 browser_worker_tx.clone(),
-                queue_job_tx.clone(),
-                main_client.clone(),
-                platforms,
-                true, // TODO: Make this configurable
-                socks_port,
+                scheduler,
+                worker_config.clone(),
             )
-            .unwrap()
+        };
+
+        // Build Cron workers
+        let stop_cron_flag = Arc::new(AtomicBool::new(false));
+        for cron_platform in cron_platforms.iter_mut() {
+            cron_platform.set_queue_job(queue_job_tx.clone());
+            cron_platform.set_stop_flag(stop_cron_flag.clone());
+        }
+        let cron_workers = cron_platforms
+            .into_iter()
+            .map(|builder| builder.build())
+            .collect::<Vec<_>>();
+
+        // Build HTTP workers
+        let http_workers = (0..worker_config.http_workers)
+            .map(|worker_id| {
+                let platforms = http_platforms
+                    .iter()
+                    .map(|builder| {
+                        let platform = builder.platform();
+                        (
+                            platform.clone(),
+                            HttpPlatformData::new(
+                                builder.build(),
+                                http_platform_configs.get(&platform).unwrap().clone(),
+                            ),
+                        )
+                    })
+                    .collect::<HashMap<_, _>>();
+                HttpWorker::new(
+                    worker_id,
+                    request_job_tx.clone(),
+                    http_worker_rx.clone(),
+                    http_worker_tx.clone(),
+                    queue_job_tx.clone(),
+                    main_client.clone(),
+                    platforms,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        // Build Browser workers
+        const STARTING_PORT: u16 = 9050;
+        let browser_workers: Vec<BrowserWorker<P, C, M>> = (0..worker_config.browser_workers)
+            .map(|worker_id| {
+                let platforms = browser_platforms
+                    .iter()
+                    .map(|builder| {
+                        let platform = builder.platform();
+                        (
+                            platform.clone(),
+                            BrowserPlatformData::new(
+                                builder.build(),
+                                browser_platform_configs.get(&platform).unwrap().clone(),
+                            ),
+                        )
+                    })
+                    .collect::<HashMap<_, _>>();
+                let socks_port = STARTING_PORT + worker_id as u16;
+                BrowserWorker::new(
+                    worker_id,
+                    request_job_tx.clone(),
+                    browser_worker_rx.clone(),
+                    browser_worker_tx.clone(),
+                    queue_job_tx.clone(),
+                    main_client.clone(),
+                    platforms,
+                    true, // TODO: Make this configurable
+                    socks_port,
+                )
+                .unwrap()
+            })
+            .collect();
+
+        const QUEUE_WORKERS: usize = 2;
+        let mut handles = Vec::with_capacity(http_workers.len() + QUEUE_WORKERS);
+        info!("Starting {} cron platforms", cron_workers.len());
+        for platform in cron_workers {
+            handles.push(tokio::task::spawn(platform.start()));
+        }
+        info!("Starting {} http workers", http_workers.len());
+        for worker in http_workers {
+            handles.push(tokio::task::spawn(worker.start()));
+        }
+        info!("Starting {} browser workers", browser_workers.len());
+        for worker in browser_workers {
+            handles.push(tokio::task::spawn(worker.start()));
+        }
+        info!("Starting queue");
+        let queue_handles = job_distributor.start();
+
+        Ok(CTRuntime {
+            stop_queue_worker: queue_job_tx,
+            stop_cron_flag,
+            queue_handles,
+            join_handles: handles,
         })
-        .collect();
-
-    const QUEUE_WORKERS: usize = 2;
-    let mut handles = Vec::with_capacity(http_workers.len() + QUEUE_WORKERS);
-    info!("Starting {} cron platforms", cron_platforms.len());
-    for platform in cron_platforms {
-        handles.push(tokio::task::spawn(platform.start()));
-    }
-    info!("Starting {} http workers", http_workers.len());
-    for worker in http_workers {
-        handles.push(tokio::task::spawn(worker.start()));
-    }
-    info!("Starting {} browser workers", browser_workers.len());
-    for worker in browser_workers {
-        handles.push(tokio::task::spawn(worker.start()));
-    }
-    info!("Starting queue");
-    handles.extend(job_distributor.start());
-
-    for handle in handles {
-        handle.await??;
     }
 
-    Ok(())
+    pub async fn join(self) -> Result<()> {
+        let n_worker_handles = self.join_handles.len();
+        self.stop_cron_flag
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        for (i, handle) in self.join_handles.into_iter().enumerate() {
+            handle.await??;
+            info!("Joined worker handle {}/{n_worker_handles}", i + 1);
+        }
+        self.stop_queue_worker
+            .send(QueueJob::StopProgram)
+            .map_err(|e| anyhow!("Failed to send stop program to queue in runtime: {:?}", e))?;
+        let n_queue_handles = self.queue_handles.len();
+        for (i, handle) in self.queue_handles.into_iter().enumerate() {
+            handle.await??;
+            info!("Joined queue handle {}/{n_queue_handles}", i + 1);
+        }
+        Ok(())
+    }
+
+    pub fn stop(&self) -> impl FnOnce() -> Result<()> {
+        let stop_queue_worker = self.stop_queue_worker.clone();
+        move || {
+            info!("Stopping program");
+            stop_queue_worker
+                .send(QueueJob::SendStopProgram)
+                .map_err(|e| anyhow!("Failed to send stop program to queue in runtime: {:?}", e))?;
+            Ok(())
+        }
+    }
 }

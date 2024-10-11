@@ -1,7 +1,7 @@
 use concurrent_tor::{
     config::ScraperConfig,
     execution::{
-        runtime::run_scraper_runtime,
+        runtime::CTRuntime,
         scheduler::{PlatformT, SimpleScheduler, WorkerRequest},
     },
     exports::StrumFromRepr,
@@ -65,12 +65,14 @@ mod cron {
     use super::{browser::IpBrowserRequest, Platform};
     use concurrent_tor::{
         execution::{
-            cron::CronPlatform,
+            cron::{CronPlatform, CronPlatformBuilder},
             scheduler::{Job, QueueJob},
         },
         exports::{async_trait, CrossbeamSender},
         Result,
     };
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
     use std::time::Duration;
     use tokio::time::sleep;
 
@@ -78,33 +80,59 @@ mod cron {
     const IP_BROWSER_URL: &str = "https://whatismyipaddress.com/";
 
     pub struct IpCron {
-        queue_job: Option<CrossbeamSender<QueueJob<Platform>>>,
-    }
-
-    impl IpCron {
-        pub fn new() -> Self {
-            Self { queue_job: None }
-        }
+        queue_job: CrossbeamSender<QueueJob<Platform>>,
+        stop_flag: Arc<AtomicBool>,
     }
 
     #[async_trait]
     impl CronPlatform<Platform> for IpCron {
-        fn set_queue_job(&mut self, queue_job: CrossbeamSender<QueueJob<Platform>>) {
-            self.queue_job = Some(queue_job);
-        }
-
         async fn start(self: Box<Self>) -> Result<()> {
-            let queue_job = self.queue_job.unwrap();
             loop {
+                if self.stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+
                 let req = IpBrowserRequest {
                     url: IP_HTTP_URL.to_string(),
                 };
                 let job = Job::init(Platform::IpBrowser, Box::new(req));
                 let job = QueueJob::New(job);
-                queue_job.send(job)?;
+                self.queue_job.send(job).expect("Failed to send job");
                 println!("IpCron job sent");
-                sleep(Duration::from_millis(1000)).await;
+                sleep(Duration::from_millis(300)).await;
             }
+            Ok(())
+        }
+    }
+
+    pub struct IpCronBuilder {
+        queue_job: Option<CrossbeamSender<QueueJob<Platform>>>,
+        stop_flag: Option<Arc<AtomicBool>>,
+    }
+
+    impl IpCronBuilder {
+        pub fn new() -> Self {
+            Self {
+                queue_job: None,
+                stop_flag: None,
+            }
+        }
+    }
+
+    impl CronPlatformBuilder<Platform> for IpCronBuilder {
+        fn set_queue_job(&mut self, queue_job: CrossbeamSender<QueueJob<Platform>>) {
+            self.queue_job = Some(queue_job);
+        }
+
+        fn set_stop_flag(&mut self, stop_flag: Arc<AtomicBool>) {
+            self.stop_flag = Some(stop_flag);
+        }
+
+        fn build(&self) -> Box<dyn CronPlatform<Platform>> {
+            Box::new(IpCron {
+                queue_job: self.queue_job.clone().unwrap(),
+                stop_flag: self.stop_flag.clone().unwrap(),
+            })
         }
     }
 }
@@ -287,15 +315,24 @@ async fn main() -> Result<()> {
     info!("Starting up");
 
     let config = ScraperConfig::init("Config.toml")?;
-    run_scraper_runtime(
+    let rt = CTRuntime::run_scraper_runtime(
         config.workers,
         SimpleScheduler::new(),
         build_main_client().await?,
-        vec![cron_box(cron::IpCron::new())],
+        vec![cron_box(cron::IpCronBuilder::new())],
         config.http_platforms,
         vec![http_box(http::IpHttpBuilder::new())],
         config.browser_platforms,
         vec![browser_box(browser::IpBrowserBuilder::new())],
     )
-    .await
+    .await?;
+
+    let stop = rt.stop();
+    tokio::task::spawn(async move {
+        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+        stop().expect("Failed to stop runtime");
+    });
+
+    rt.join().await?;
+    Ok(())
 }

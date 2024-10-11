@@ -4,9 +4,16 @@ use crate::{
 };
 use async_trait::async_trait;
 use crossbeam::channel::Sender;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+
+pub trait CronPlatformBuilder<P: PlatformT> {
+    fn set_queue_job(&mut self, queue_job: Sender<QueueJob<P>>);
+    fn set_stop_flag(&mut self, stop_flag: Arc<AtomicBool>);
+    fn build(&self) -> Box<dyn CronPlatform<P>>;
+}
 
 #[async_trait]
 pub trait CronPlatform<P: PlatformT>: Send {
-    fn set_queue_job(&mut self, queue_job: Sender<QueueJob<P>>);
     async fn start(self: Box<Self>) -> Result<()>;
 }

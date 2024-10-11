@@ -2,15 +2,16 @@ use crate::{
     config::BrowserPlatformConfig,
     execution::{
         client::{Client, MainClient},
-        scheduler::{Job, NotRequested, PlatformT, QueueJob, QueueJobStatus},
+        scheduler::{Job, NotRequested, PlatformT, QueueJob, QueueJobStatus, WorkerAction},
     },
     Result,
 };
+use anyhow::anyhow;
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 use crossbeam::channel::{Receiver, Sender};
 use headless_chrome::{Browser, LaunchOptions, Tab};
-use log::debug;
+use log::{debug, info};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
@@ -80,9 +81,9 @@ pub struct BrowserWorker<P: PlatformT, C: Client, M: MainClient<C>> {
     /// Request job from a queue
     request_job: Sender<QueueJobStatus>,
     /// Receive job from a queue
-    recv_job: Receiver<Job<NotRequested, P>>,
+    recv_job: Receiver<WorkerAction<P>>,
     /// Add job back to queue if the worker is unable to process it (possibly due to rate limiting)
-    requeue_job: Sender<Job<NotRequested, P>>,
+    requeue_job: Sender<WorkerAction<P>>,
     /// Add a new, or existing job to the queue
     queue_job: Sender<QueueJob<P>>,
     /// Here to query a new client when necessary
@@ -93,6 +94,8 @@ pub struct BrowserWorker<P: PlatformT, C: Client, M: MainClient<C>> {
     proxy_handle: JoinHandle<()>,
     /// Browser handle
     browser: Browser,
+    /// Tab handle to keep browser alive
+    tab: Arc<Tab>,
     #[allow(dead_code)]
     /// Headless mode
     headless: bool,
@@ -110,8 +113,8 @@ where
     pub fn new(
         worker_id: u32,
         request_job: Sender<QueueJobStatus>,
-        recv_job: Receiver<Job<NotRequested, P>>,
-        requeue_job: Sender<Job<NotRequested, P>>,
+        recv_job: Receiver<WorkerAction<P>>,
+        requeue_job: Sender<WorkerAction<P>>,
         queue_job: Sender<QueueJob<P>>,
         main_client: M,
         platforms: HashMap<P, BrowserPlatformData<P>>,
@@ -128,7 +131,7 @@ where
             .headless(headless)
             .build()
             .expect("Failed to find chrome executable");
-
+        let browser = Browser::new(browser_opts)?;
         Ok(BrowserWorker {
             worker_id,
             request_job,
@@ -138,7 +141,8 @@ where
             proxy_handle: Self::start_proxy_handle(worker_id, &main_client, port),
             main_client,
             platforms,
-            browser: Browser::new(browser_opts)?,
+            tab: browser.new_tab()?,
+            browser,
             headless,
             port,
             _client: std::marker::PhantomData,
@@ -174,7 +178,14 @@ where
     pub(crate) async fn start(mut self) -> Result<()> {
         debug!("Starting worker {}", self.worker_id);
         loop {
-            let job = self.recv_job.recv()?;
+            let action = self.recv_job.recv()?;
+            let job = match action {
+                WorkerAction::Job(job) => job,
+                WorkerAction::StopProgram => {
+                    info!("Stopping browser worker {}", self.worker_id);
+                    break;
+                }
+            };
             let platform = self.platforms.get_mut(&job.platform).unwrap();
             match platform.can_request() {
                 BrowserPlatformBehaviourError::Ok => {
@@ -183,19 +194,37 @@ where
                     let jobs = platform.platform_impl.process_job(job, tab).await;
                     platform.request_complete();
                     for job in jobs {
-                        self.queue_job.send(job)?;
+                        self.queue_job.send(job).map_err(|e| {
+                            anyhow!(
+                                "Failed to send job to queue in browser worker {}: {:?}",
+                                self.worker_id,
+                                e
+                            )
+                        })?;
                     }
                 }
                 BrowserPlatformBehaviourError::MustWait => {
                     debug!("Rate limiting for browser worker {}", self.worker_id);
                     // Return the job so another worker can process it, or we can retry later
-                    self.requeue_job.send(job)?;
+                    self.requeue_job.send(WorkerAction::Job(job)).map_err(|e| {
+                        anyhow!(
+                            "Failed to requeue job in browser worker {}: {:?}",
+                            self.worker_id,
+                            e
+                        )
+                    })?;
                     // TODO: Add sleep?
                 }
                 BrowserPlatformBehaviourError::MaxRequests => {
                     debug!("Max requests for browser worker {}", self.worker_id);
                     // Return the job so another worker can process it, or we can retry later
-                    self.requeue_job.send(job)?;
+                    self.requeue_job.send(WorkerAction::Job(job)).map_err(|e| {
+                        anyhow!(
+                            "Failed to requeue job in browser worker {}: {:?}",
+                            self.worker_id,
+                            e
+                        )
+                    })?;
                     // Renew the client so we get a new IP
                     self = self.renew_client()?;
                     // Reset all platforms so we can make more requests
@@ -204,9 +233,18 @@ where
                     }
                 }
             }
-            self.request_job.send(QueueJobStatus::WorkerCompleted {
-                worker_id: self.worker_id,
-            })?;
+            self.request_job
+                .send(QueueJobStatus::WorkerCompleted {
+                    worker_id: self.worker_id,
+                })
+                .map_err(|e| {
+                    anyhow!(
+                        "Failed to send worker completed status {}: {:?}",
+                        self.worker_id,
+                        e
+                    )
+                })?;
         }
+        Ok(())
     }
 }
