@@ -25,6 +25,7 @@ where
     pub platform: P,
     pub hash: String,
     pub num_attempts: i32,
+    pub max_attempts: i32,
     pub request: String,
 }
 
@@ -46,6 +47,7 @@ where
             platform: P::from_repr(platform_int as usize),
             hash: row.try_get("hash")?,
             num_attempts: row.try_get("num_attempts")?,
+            max_attempts: row.try_get("max_attempts")?,
             request: row.try_get("request")?,
         })
     }
@@ -66,6 +68,7 @@ where
     pub async fn insert_new(
         pool: &mut DB,
         num_attempts: i32,
+        max_attempts: i32,
         hash: u128,
         platform: P,
         request_json: &str,
@@ -74,15 +77,17 @@ where
         let hash = hash.to_string();
         let platform_int = platform.to_repr() as i32;
         sqlx::query(
-            "INSERT INTO job_cache (status, platform, hash, num_attempts, request) VALUES ($1, $2, $3, $4, $5)"
+            "INSERT INTO job_cache (status, platform, hash, num_attempts, max_attempts, request) \
+                    VALUES ($1, $2, $3, $4, $5, $6)",
         )
-            .bind(JobStatusDb::Active as i32)
-            .bind(platform_int)
-            .bind(hash)
-            .bind(num_attempts)
-            .bind(request_json)
-            .execute(pool)
-            .await?;
+        .bind(JobStatusDb::Active as i32)
+        .bind(platform_int)
+        .bind(hash)
+        .bind(num_attempts)
+        .bind(max_attempts)
+        .bind(request_json)
+        .execute(pool)
+        .await?;
         Ok(())
     }
 
@@ -104,9 +109,9 @@ where
 }
 
 pub async fn connect_and_init_db() -> Result<DB> {
-    const DATASE_FP: &str = "concurrent_tor.sqlite3";
+    const DATABASE_FP: &str = "concurrent_tor.sqlite3";
     let options = SqliteConnectOptions::new()
-        .filename(DATASE_FP)
+        .filename(DATABASE_FP)
         .create_if_missing(true);
     let mut pool = SqliteConnection::connect_with(&options).await?;
     init_db(&mut pool).await?;
@@ -121,6 +126,7 @@ async fn init_db(pool: &mut DB) -> Result<()> {
             platform INTEGER NOT NULL,
             hash TEXT NOT NULL,
             num_attempts INTEGER NOT NULL,
+            max_attempts INTEGER NOT NULL,
             request TEXT NOT NULL
         )",
     )

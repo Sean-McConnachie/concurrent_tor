@@ -115,14 +115,14 @@ mod cron {
             let req = IpHttpRequest {
                 url: format!("http://{}:{}/post", SERVER_ADDR.0, SERVER_ADDR.1),
             };
-            Job::init(Platform::IpHttp, Box::new(req))
+            Job::init_from_box(Platform::IpHttp, req, 3)
         }
 
         fn build_browser_job(&self) -> Job<NotRequested, Platform> {
             let req = IpBrowserRequest {
                 url: format!("http://{}:{}/get/", SERVER_ADDR.0, SERVER_ADDR.1),
             };
-            Job::init(Platform::IpBrowser, Box::new(req))
+            Job::init(Platform::IpBrowser, Box::new(req), 3)
         }
     }
 
@@ -374,12 +374,12 @@ mod browser {
 mod monitor {
     use crate::server::ServerEvent;
     use crate::Platform;
+    use async_channel::Receiver;
     use concurrent_tor::exports::AsyncChannelReceiver;
     use concurrent_tor::{
         execution::monitor::{Event, Monitor},
         exports::async_trait,
     };
-    use crossbeam::channel::Receiver;
 
     pub struct MyMonitor {
         server_event: Receiver<ServerEvent>,
@@ -390,10 +390,11 @@ mod monitor {
             MyMonitor { server_event }
         }
 
-        fn start_server_recv(server_event: Receiver<ServerEvent>) {
+        async fn start_server_recv(server_event: Receiver<ServerEvent>) {
             loop {
                 let server_event = server_event
                     .recv()
+                    .await
                     .expect("Failed to receive event from the server");
                 if let ServerEvent::StopServer = server_event {
                     break;
@@ -422,9 +423,8 @@ mod monitor {
             self,
             event_rx: AsyncChannelReceiver<Event<Platform>>,
         ) -> concurrent_tor::Result<()> {
-            let _server_handle = tokio::task::spawn_blocking(move || {
-                MyMonitor::start_server_recv(self.server_event.clone())
-            });
+            let _server_handle =
+                tokio::task::spawn(MyMonitor::start_server_recv(self.server_event.clone()));
             let ct_handle = tokio::task::spawn(MyMonitor::start_ct_recv(event_rx.clone()));
             // server_handle.await?;
             ct_handle.await?;
@@ -437,7 +437,7 @@ mod server {
     use actix_web::dev::ServerHandle;
     use actix_web::http::StatusCode;
     use actix_web::{get, post, web, App, HttpServer, Responder};
-    use crossbeam::channel::{Receiver, Sender};
+    use async_channel::{Receiver, Sender};
     use log::info;
     use rand::prelude::SliceRandom;
     use rand::rngs::OsRng;
@@ -490,10 +490,16 @@ mod server {
         let job_hash: u128 = job_hash.parse().unwrap();
         let job_info = JobInfo::new(job_hash.clone());
         if rand_success() {
-            events.send(ServerEvent::GetSuccess(job_info)).unwrap();
+            events
+                .send(ServerEvent::GetSuccess(job_info))
+                .await
+                .unwrap();
             format!("Job hash: {}", job_hash)
         } else {
-            events.send(ServerEvent::GetFailure(job_info)).unwrap();
+            events
+                .send(ServerEvent::GetFailure(job_info))
+                .await
+                .unwrap();
             format!("Failed to get job hash: {}", job_hash)
         }
     }
@@ -508,14 +514,20 @@ mod server {
         let job_hash: u128 = job.hash.parse().unwrap();
         let job_info = JobInfo::new(job_hash.clone());
         if rand_success() {
-            events.send(ServerEvent::InfoSuccess(job_info)).unwrap();
+            events
+                .send(ServerEvent::InfoSuccess(job_info))
+                .await
+                .unwrap();
             let choices = vec![StatusCode::OK, StatusCode::CREATED, StatusCode::ACCEPTED];
             (
                 "success".to_string(),
                 choices.choose(&mut OsRng::default()).unwrap().clone(),
             )
         } else {
-            events.send(ServerEvent::InfoFailure(job_info)).unwrap();
+            events
+                .send(ServerEvent::InfoFailure(job_info))
+                .await
+                .unwrap();
             let choices = vec![
                 StatusCode::BAD_REQUEST,
                 StatusCode::FORBIDDEN,
@@ -538,7 +550,7 @@ mod server {
         Receiver<ServerEvent>,
         Sender<ServerEvent>,
     )> {
-        let (event_tx, event_rx) = crossbeam::channel::unbounded::<ServerEvent>();
+        let (event_tx, event_rx) = async_channel::unbounded::<ServerEvent>();
         let event_tx_clone = event_tx.clone();
         let server = HttpServer::new(move || {
             App::new()
@@ -608,7 +620,7 @@ async fn my_main() -> Result<()> {
     });
 
     ct.join().await?;
-    server_events_tx.send(ServerEvent::StopServer).unwrap();
+    server_events_tx.send(ServerEvent::StopServer).await?;
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     server_handle.stop(true).await;
     server_join.await??;

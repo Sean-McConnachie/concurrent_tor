@@ -43,6 +43,7 @@ pub struct Job<RequestStatus, P: PlatformT> {
     pub platform: P,
     pub request: Box<dyn WorkerRequest>,
     pub num_attempts: u32,
+    pub max_attempts: u32,
 
     _status: std::marker::PhantomData<RequestStatus>,
 }
@@ -56,29 +57,41 @@ impl<P> Job<NotRequested, P>
 where
     P: PlatformT,
 {
-    pub fn new(platform: P, request: Box<dyn WorkerRequest>, num_attempts: u32) -> Self {
+    pub fn new(
+        platform: P,
+        request: Box<dyn WorkerRequest>,
+        num_attempts: u32,
+        max_attempts: u32,
+    ) -> Self {
         Job {
             platform,
             request,
             num_attempts,
+            max_attempts,
             _status: std::marker::PhantomData,
         }
     }
 
-    pub fn init(platform: P, request: Box<dyn WorkerRequest>) -> Self {
+    pub fn init(platform: P, request: Box<dyn WorkerRequest>, max_attempts: u32) -> Self {
         Job {
             platform,
             request,
             num_attempts: 0,
+            max_attempts,
             _status: std::marker::PhantomData,
         }
     }
 
-    pub fn init_from_box<T: WorkerRequest + 'static>(platform: P, request: T) -> Self {
+    pub fn init_from_box<T: WorkerRequest + 'static>(
+        platform: P,
+        request: T,
+        max_attempts: u32,
+    ) -> Self {
         Job {
             platform,
             request: Box::new(request),
             num_attempts: 0,
+            max_attempts,
             _status: std::marker::PhantomData,
         }
     }
@@ -93,6 +106,7 @@ where
             platform: job.platform,
             request: job.request,
             num_attempts: job.num_attempts + 1,
+            max_attempts: job.max_attempts,
             _status: std::marker::PhantomData,
         }
     }
@@ -228,7 +242,12 @@ where
         let jobs = JobCache::<P>::fetch_all_active(&mut db).await?;
         for job in jobs {
             let request = job.platform.request_from_json(&job.request)?;
-            let job = Job::new(job.platform, request, job.num_attempts as u32);
+            let job = Job::new(
+                job.platform,
+                request,
+                job.num_attempts as u32,
+                job.max_attempts as u32,
+            );
             scheduler.lock().await.enqueue(job);
             notify_new_job
                 .send(QueueJobStatus::NewJobArrived)
@@ -250,6 +269,7 @@ where
                     JobCache::insert_new(
                         &mut db,
                         job.num_attempts as i32,
+                        job.max_attempts as i32,
                         job_hash,
                         job.platform.clone(),
                         &job.request.as_json(),
