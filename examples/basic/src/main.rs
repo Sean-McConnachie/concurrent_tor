@@ -70,8 +70,8 @@ pub enum Platform {
 impl PlatformT for Platform {
     fn request_from_json(&self, json: &str) -> Result<Box<dyn WorkerRequest>> {
         match self {
-            Platform::IpHttp => http::IpHttpRequest::from_json(json),
-            Platform::IpBrowser => browser::IpBrowserRequest::from_json(json),
+            Platform::IpHttp => http::MyHttpRequest::from_json(json),
+            Platform::IpBrowser => browser::MyBrowserRequest::from_json(json),
         }
     }
 
@@ -86,22 +86,20 @@ impl PlatformT for Platform {
 
 mod cron {
     use super::{Platform, SERVER_ADDR};
-    use crate::browser::IpBrowserRequest;
-    use crate::http::IpHttpRequest;
-    use concurrent_tor::execution::scheduler::NotRequested;
-    use concurrent_tor::exports::AsyncChannelSender;
+    use crate::{browser::MyBrowserRequest, http::MyHttpRequest};
     use concurrent_tor::{
         execution::{
             cron::{CronPlatform, CronPlatformBuilder},
-            scheduler::{Job, QueueJob},
+            scheduler::{Job, NotRequested, QueueJob},
         },
-        exports::async_trait,
+        exports::{async_trait, AsyncChannelSender},
         Result,
     };
     use log::info;
-    use std::sync::atomic::AtomicBool;
-    use std::sync::Arc;
-    use std::time::Duration;
+    use std::{
+        sync::{atomic::AtomicBool, Arc},
+        time::Duration,
+    };
     use tokio::time::sleep;
 
     pub struct Cron {
@@ -112,16 +110,14 @@ mod cron {
 
     impl Cron {
         fn build_http_job(&self) -> Job<NotRequested, Platform> {
-            let req = IpHttpRequest {
-                url: format!("http://{}:{}/post", SERVER_ADDR.0, SERVER_ADDR.1),
-            };
+            let req =
+                MyHttpRequest::new(format!("http://{}:{}/post", SERVER_ADDR.0, SERVER_ADDR.1));
             Job::init_from_box(Platform::IpHttp, req, 3)
         }
 
         fn build_browser_job(&self) -> Job<NotRequested, Platform> {
-            let req = IpBrowserRequest {
-                url: format!("http://{}:{}/get/", SERVER_ADDR.0, SERVER_ADDR.1),
-            };
+            let req =
+                MyBrowserRequest::new(format!("http://{}:{}/get/", SERVER_ADDR.0, SERVER_ADDR.1));
             Job::init(Platform::IpBrowser, Box::new(req), 3)
         }
     }
@@ -189,9 +185,9 @@ mod cron {
 mod http {
     use super::{ClientBackend, Platform};
     use crate::server::JobPost;
-    use concurrent_tor::execution::client::Client;
     use concurrent_tor::{
         execution::{
+            client::Client,
             http::{HttpPlatform, HttpPlatformBuilder},
             scheduler::{Job, NotRequested, QueueJob, WorkerRequest},
         },
@@ -199,27 +195,35 @@ mod http {
         Result,
     };
     use serde::{Deserialize, Serialize};
-    use std::{any::Any, io::Cursor};
+    use std::any::Any;
 
     #[derive(Debug, Serialize, Deserialize)]
-    pub struct IpHttpRequest {
+    pub struct MyHttpRequest {
+        pub id: usize,
         pub url: String,
     }
 
-    impl IpHttpRequest {
+    impl MyHttpRequest {
+        pub fn new(url: impl Into<String>) -> Self {
+            Self {
+                id: rand::random(),
+                url: url.into(),
+            }
+        }
+
         pub fn from_json(json: &str) -> Result<Box<dyn WorkerRequest>> {
             let s: Result<Self> = json_from_str(json).map_err(|e| e.into());
             Ok(Box::new(s?))
         }
     }
 
-    impl WorkerRequest for IpHttpRequest {
+    impl WorkerRequest for MyHttpRequest {
         fn as_any(&self) -> &dyn Any {
             self
         }
 
         fn hash(&self) -> Result<u128> {
-            Ok(murmur3_x64_128(&mut Cursor::new(&self.url), 0)?)
+            Ok(self.id as u128)
         }
 
         fn as_json(&self) -> String {
@@ -242,7 +246,7 @@ mod http {
             job: Job<NotRequested, Platform>,
             client: &ClientBackend,
         ) -> Vec<QueueJob<Platform>> {
-            let job: &IpHttpRequest = job.request.as_any().downcast_ref().unwrap();
+            let job: &MyHttpRequest = job.request.as_any().downcast_ref().unwrap();
             // println!("IpHttp job response: {:?}", job);
             let job_post = JobPost {
                 hash: job.hash().expect("Unable to hash").to_string(),
@@ -293,28 +297,34 @@ mod browser {
         Result,
     };
     use serde::{Deserialize, Serialize};
-    use std::sync::Arc;
-    use std::{any::Any, io::Cursor};
+    use std::{any::Any, sync::Arc};
 
     #[derive(Serialize, Deserialize, Debug)]
-    pub struct IpBrowserRequest {
+    pub struct MyBrowserRequest {
+        pub id: usize,
         pub url: String,
     }
 
-    impl IpBrowserRequest {
+    impl MyBrowserRequest {
+        pub fn new(url: impl Into<String>) -> Self {
+            Self {
+                id: rand::random(),
+                url: url.into(),
+            }
+        }
         pub fn from_json(json: &str) -> Result<Box<dyn WorkerRequest>> {
             let s: Result<Self> = json_from_str(json).map_err(|e| e.into());
             Ok(Box::new(s?))
         }
     }
 
-    impl WorkerRequest for IpBrowserRequest {
+    impl WorkerRequest for MyBrowserRequest {
         fn as_any(&self) -> &dyn Any {
             self
         }
 
         fn hash(&self) -> Result<u128> {
-            Ok(murmur3_x64_128(&mut Cursor::new(&self.url), 0)?)
+            Ok(self.id as u128)
         }
 
         fn as_json(&self) -> String {
@@ -337,7 +347,7 @@ mod browser {
             job: Job<NotRequested, Platform>,
             tab: Arc<headless_chrome::Tab>,
         ) -> Vec<QueueJob<Platform>> {
-            let job: &IpBrowserRequest = job.request.as_any().downcast_ref().unwrap();
+            let job: &MyBrowserRequest = job.request.as_any().downcast_ref().unwrap();
             // println!("IpBrowser job response: {:?}", job);
             let url = job.url.clone();
             let url = format!("{}{}", url, job.hash().unwrap());
@@ -372,13 +382,11 @@ mod browser {
 }
 
 mod monitor {
-    use crate::server::ServerEvent;
-    use crate::Platform;
+    use crate::{server::ServerEvent, Platform};
     use async_channel::Receiver;
-    use concurrent_tor::exports::AsyncChannelReceiver;
     use concurrent_tor::{
         execution::monitor::{Event, Monitor},
-        exports::async_trait,
+        exports::{async_trait, AsyncChannelReceiver},
     };
 
     pub struct MyMonitor {
@@ -434,13 +442,12 @@ mod monitor {
 }
 
 mod server {
-    use actix_web::dev::ServerHandle;
-    use actix_web::http::StatusCode;
-    use actix_web::{get, post, web, App, HttpServer, Responder};
+    use actix_web::{
+        dev::ServerHandle, get, http::StatusCode, post, web, App, HttpServer, Responder,
+    };
     use async_channel::{Receiver, Sender};
     use log::info;
-    use rand::prelude::SliceRandom;
-    use rand::rngs::OsRng;
+    use rand::{prelude::SliceRandom, rngs::OsRng};
     use serde::{Deserialize, Serialize};
     use tokio::task::JoinHandle;
 
