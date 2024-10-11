@@ -1,11 +1,16 @@
-use crate::execution::client::WorkerType;
-use crate::execution::monitor::{BasicWorkerInfo, ProcessedJobInfo};
 use crate::{
     config::BrowserPlatformConfig,
+    database::JobStatusDb,
     execution::{
-        client::{Client, MainClient},
-        monitor::Event,
-        scheduler::{Job, NotRequested, PlatformT, QueueJob, QueueJobStatus, WorkerAction},
+        client::{
+            worker_job_logic_process, worker_job_logic_start, Client, MainClient,
+            WorkerLogicAction, WorkerType,
+        },
+        monitor::{BasicWorkerInfo, Event, ProcessedJobInfo},
+        scheduler::{
+            Job, NotRequested, PlatformCanRequest, PlatformHistory, PlatformT, QueueJob,
+            QueueJobStatus, WorkerAction,
+        },
     },
     Result,
 };
@@ -26,7 +31,7 @@ pub trait BrowserPlatformBuilder<P: PlatformT>: Send {
 #[async_trait]
 pub trait BrowserPlatform<P: PlatformT>: Send {
     /// Function should not fail when passed back to the API. Therefore, it should handle all errors itself.
-    async fn process_job(&self, job: Job<NotRequested, P>, tab: Arc<Tab>) -> Vec<QueueJob<P>>;
+    async fn process_job(&self, job: &Job<NotRequested, P>, tab: Arc<Tab>) -> Vec<QueueJob<P>>;
 }
 
 enum BrowserPlatformBehaviourError {
@@ -35,35 +40,32 @@ enum BrowserPlatformBehaviourError {
     MaxRequests,
 }
 
-pub struct BrowserPlatformData<P: PlatformT> {
-    platform_impl: Box<dyn BrowserPlatform<P>>,
+pub struct BrowserPlatformData {
     config: BrowserPlatformConfig,
     last_request: quanta::Instant,
     requests: u32,
 }
 
-impl<P> BrowserPlatformData<P>
-where
-    P: PlatformT,
-{
-    pub fn new(platform_impl: Box<dyn BrowserPlatform<P>>, config: BrowserPlatformConfig) -> Self {
+impl BrowserPlatformData {
+    pub fn new(config: BrowserPlatformConfig) -> Self {
         BrowserPlatformData {
-            platform_impl,
             config,
             last_request: quanta::Instant::now(),
             requests: 0,
         }
     }
+}
 
-    fn can_request(&self, now: quanta::Instant) -> BrowserPlatformBehaviourError {
+impl PlatformHistory for BrowserPlatformData {
+    fn can_request(&self, now: quanta::Instant) -> PlatformCanRequest {
         let diff = now - self.last_request;
         if self.requests >= self.config.max_requests {
-            return BrowserPlatformBehaviourError::MaxRequests;
+            return PlatformCanRequest::MaxRequests;
         }
         if diff.as_micros() > (self.config.timeout_ms as u128) * 1000 {
-            return BrowserPlatformBehaviourError::Ok;
+            return PlatformCanRequest::Ok;
         }
-        BrowserPlatformBehaviourError::MustWait
+        PlatformCanRequest::MustWait
     }
 
     fn request_complete(&mut self, ts_end: quanta::Instant) {
@@ -91,7 +93,9 @@ pub struct BrowserWorker<P: PlatformT, C: Client, M: MainClient<C>> {
     /// Here to query a new client when necessary
     main_client: M,
     /// Platforms that store [BrowserPlatform], the last request time, and the number of requests.
-    platforms: HashMap<P, BrowserPlatformData<P>>,
+    platform_data: HashMap<P, BrowserPlatformData>,
+    /// Platform implementations
+    platform_impls: HashMap<P, Box<dyn BrowserPlatform<P>>>,
     /// Proxy handle
     proxy_handle: JoinHandle<()>,
     /// Browser handle
@@ -118,7 +122,8 @@ where
         requeue_job: Sender<WorkerAction<P>>,
         queue_job: Sender<QueueJob<P>>,
         main_client: M,
-        platforms: HashMap<P, BrowserPlatformData<P>>,
+        platform_data: HashMap<P, BrowserPlatformData>,
+        platform_impls: HashMap<P, Box<dyn BrowserPlatform<P>>>,
         headless: bool,
         port: u16,
     ) -> Result<Self> {
@@ -142,7 +147,8 @@ where
             queue_job,
             proxy_handle: Self::start_proxy_handle(worker_id, &main_client, port),
             main_client,
-            platforms,
+            platform_data,
+            platform_impls,
             browser,
             headless,
             port,
@@ -177,7 +183,7 @@ where
     }
 
     pub(crate) async fn start(mut self) -> Result<()> {
-        debug!("Starting worker {}", self.worker_id);
+        info!("Starting browser worker {}", self.worker_id);
         loop {
             let action = self.recv_job.recv().await?;
             let job = match action {
@@ -187,112 +193,49 @@ where
                 }
             };
 
-            let ts_start = quanta::Instant::now();
-            let platform = self.platforms.get_mut(&job.platform).unwrap();
-            let job_platform = job.platform;
-            match platform.can_request(ts_start) {
-                BrowserPlatformBehaviourError::Ok => {
-                    debug!("Processing job for browser worker {}", self.worker_id);
-                    let job_hash = job.request.hash()?;
-
-                    let tab = self.browser.new_tab()?;
-                    let jobs = platform.platform_impl.process_job(job, tab).await;
-                    let ts_end = quanta::Instant::now();
-                    self.monitor
-                        .send(Event::ProcessedJob(ProcessedJobInfo::new(
-                            job_platform,
-                            WorkerType::Browser,
-                            self.worker_id,
-                            ts_start,
-                            ts_end,
-                            job_hash,
-                        )))
-                        .await?;
-                    platform.request_complete(ts_end);
-
-                    for job in jobs {
-                        self.queue_job
-                            .send(job)
-                            .map_err(|e| {
-                                anyhow!(
-                                    "Failed to send job to queue in browser worker {}: {:?}",
-                                    self.worker_id,
-                                    e
-                                )
-                            })
-                            .await?;
-                    }
-                }
-                BrowserPlatformBehaviourError::MustWait => {
-                    debug!("Rate limiting for browser worker {}", self.worker_id);
-                    // Return the job so another worker can process it, or we can retry later
-
-                    self.requeue_job
-                        .send(WorkerAction::Job(job))
-                        .map_err(|e| {
-                            anyhow!(
-                                "Failed to requeue job in browser worker {}: {:?}",
-                                self.worker_id,
-                                e
-                            )
-                        })
-                        .await?;
-
-                    self.monitor
-                        .send(Event::WorkerRateLimited(BasicWorkerInfo::new(
-                            job_platform,
-                            WorkerType::Browser,
-                            self.worker_id,
-                            quanta::Instant::now(),
-                        )))
-                        .await?;
-                }
-                BrowserPlatformBehaviourError::MaxRequests => {
-                    debug!("Max requests for browser worker {}", self.worker_id);
-                    // Return the job so another worker can process it, or we can retry later
-
-                    self.requeue_job
-                        .send(WorkerAction::Job(job))
-                        .map_err(|e| {
-                            anyhow!(
-                                "Failed to requeue job in browser worker {}: {:?}",
-                                self.worker_id,
-                                e
-                            )
-                        })
-                        .await?;
-
-                    // Renew the client so we get a new IP
+            match worker_job_logic_start(
+                self.worker_id,
+                job,
+                &mut self.platform_data,
+                &self.monitor,
+                &self.requeue_job,
+            )
+            .await?
+            {
+                WorkerLogicAction::Nothing => {}
+                WorkerLogicAction::RenewClient => {
                     self = self.renew_client()?;
-                    // Reset all platforms so we can make more requests
-                    for (_, platform) in self.platforms.iter_mut() {
-                        platform.reset();
-                    }
-
-                    self.monitor
-                        .send(Event::WorkerRenewingClient(BasicWorkerInfo::new(
-                            job_platform,
-                            WorkerType::Browser,
-                            self.worker_id,
-                            quanta::Instant::now(),
-                        )))
-                        .await?;
+                }
+                WorkerLogicAction::ProcessJob((ts_start, job)) => {
+                    let tab = self.browser.new_tab()?;
+                    let jobs = self
+                        .platform_impls
+                        .get(&job.platform)
+                        .unwrap()
+                        .process_job(&job, tab.clone())
+                        .await;
+                    // tokio::task::spawn_blocking(move || match tab.close(false) {
+                    //     Ok(_) => {}
+                    //     Err(e) => {
+                    //         debug!("Failed to close tab: {:?}. Already closed?", e);
+                    //     }
+                    // })
+                    // .await?;
+                    worker_job_logic_process(
+                        ts_start,
+                        self.worker_id,
+                        WorkerType::Http,
+                        job,
+                        jobs,
+                        &mut self.platform_data,
+                        &self.monitor,
+                        &self.queue_job,
+                        &self.request_job,
+                    )
+                    .await?;
                 }
             }
-            self.request_job
-                .send(QueueJobStatus::WorkerCompleted {
-                    worker_id: self.worker_id,
-                })
-                .map_err(|e| {
-                    anyhow!(
-                        "Failed to send worker completed status {}: {:?}",
-                        self.worker_id,
-                        e
-                    )
-                })
-                .await?;
         }
-        info!("Stopping browser worker {}", self.worker_id);
         Ok(())
     }
 }

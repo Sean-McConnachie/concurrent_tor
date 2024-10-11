@@ -185,6 +185,7 @@ mod cron {
 mod http {
     use super::{ClientBackend, Platform};
     use crate::server::JobPost;
+    use concurrent_tor::execution::scheduler::Requested;
     use concurrent_tor::{
         execution::{
             client::Client,
@@ -197,7 +198,7 @@ mod http {
     use serde::{Deserialize, Serialize};
     use std::any::Any;
 
-    #[derive(Debug, Serialize, Deserialize)]
+    #[derive(Debug, Serialize, Deserialize, Clone)]
     pub struct MyHttpRequest {
         pub id: usize,
         pub url: String,
@@ -243,19 +244,19 @@ mod http {
     impl HttpPlatform<Platform, ClientBackend> for IpHttp {
         async fn process_job(
             &self,
-            job: Job<NotRequested, Platform>,
+            job: &Job<NotRequested, Platform>,
             client: &ClientBackend,
         ) -> Vec<QueueJob<Platform>> {
-            let job: &MyHttpRequest = job.request.as_any().downcast_ref().unwrap();
+            let req: &MyHttpRequest = job.request.as_any().downcast_ref().unwrap();
             // println!("IpHttp job response: {:?}", job);
             let job_post = JobPost {
-                hash: job.hash().expect("Unable to hash").to_string(),
+                hash: req.hash().expect("Unable to hash").to_string(),
             };
             let body = Some(json_to_string(&job_post).unwrap());
             client
                 .make_request(
                     HttpMethod::POST,
-                    &job.url,
+                    &req.url,
                     Some(hashmap!(
                         "Content-Type".to_string() => "application/json".to_string()
                     )),
@@ -263,7 +264,8 @@ mod http {
                 )
                 .await
                 .unwrap();
-            vec![]
+            let completed: Job<Requested, Platform> = job.into();
+            vec![QueueJob::Completed(completed)]
         }
     }
 
@@ -288,6 +290,7 @@ mod http {
 
 mod browser {
     use super::Platform;
+    use concurrent_tor::execution::scheduler::Requested;
     use concurrent_tor::{
         execution::{
             browser::{BrowserPlatform, BrowserPlatformBuilder},
@@ -299,7 +302,7 @@ mod browser {
     use serde::{Deserialize, Serialize};
     use std::{any::Any, sync::Arc};
 
-    #[derive(Serialize, Deserialize, Debug)]
+    #[derive(Serialize, Deserialize, Debug, Clone)]
     pub struct MyBrowserRequest {
         pub id: usize,
         pub url: String,
@@ -344,21 +347,23 @@ mod browser {
     impl BrowserPlatform<Platform> for IpBrowser {
         async fn process_job(
             &self,
-            job: Job<NotRequested, Platform>,
+            job: &Job<NotRequested, Platform>,
             tab: Arc<headless_chrome::Tab>,
         ) -> Vec<QueueJob<Platform>> {
-            let job: &MyBrowserRequest = job.request.as_any().downcast_ref().unwrap();
+            let req: &MyBrowserRequest = job.request.as_any().downcast_ref().unwrap();
             // println!("IpBrowser job response: {:?}", job);
-            let url = job.url.clone();
-            let url = format!("{}{}", url, job.hash().unwrap());
+            let url = req.url.clone();
+            let url = format!("{}{}", url, req.hash().unwrap());
             let handle = tokio::task::spawn_blocking(move || {
                 tab.navigate_to(&url).unwrap();
                 tab.wait_until_navigated().unwrap();
                 let _r = tab.get_content().unwrap();
+                // tab.close(true).unwrap();
                 // println!("Page content: {:?}", r);
             });
             handle.await.unwrap();
-            vec![]
+            let completed: Job<Requested, Platform> = job.into();
+            vec![QueueJob::Completed(completed)]
         }
     }
 

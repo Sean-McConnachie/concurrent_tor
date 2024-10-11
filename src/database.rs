@@ -6,7 +6,7 @@ use sqlx::{
 };
 use strum::FromRepr;
 
-pub type DB = sqlx::SqliteConnection;
+pub type DB = SqliteConnection;
 
 #[derive(Debug, Serialize, Deserialize, sqlx::Type, FromRepr)]
 pub enum JobStatusDb {
@@ -127,7 +127,8 @@ async fn init_db(pool: &mut DB) -> Result<()> {
             hash TEXT NOT NULL,
             num_attempts INTEGER NOT NULL,
             max_attempts INTEGER NOT NULL,
-            request TEXT NOT NULL
+            request TEXT NOT NULL,
+            UNIQUE (hash)
         )",
     )
     .execute(pool)

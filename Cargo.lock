@@ -683,6 +683,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "dotenv",
+ "dyn-clone",
  "failure",
  "futures-util",
  "headless_chrome",

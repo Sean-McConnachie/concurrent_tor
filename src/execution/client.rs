@@ -1,16 +1,34 @@
-use crate::{execution::http::HttpResponse, Result};
+use crate::{
+    database::JobStatusDb,
+    execution::{
+        http::HttpResponse,
+        monitor::{BasicWorkerInfo, Event, Monitor, ProcessedJobInfo},
+        scheduler::{
+            Job, NotRequested, PlatformCanRequest, PlatformHistory, PlatformT, QueueJob,
+            QueueJobStatus, WorkerAction,
+        },
+    },
+    Result,
+};
 use anyhow::anyhow;
 use arti::socks::run_socks_proxy;
 use arti_client::{TorClient, TorClientConfig};
+use async_channel::Sender;
 use async_trait::async_trait;
+use futures_util::TryFutureExt;
 use http_body_util::{BodyExt, Empty};
-use hyper::body::Body;
-use hyper::{body::Bytes, http::uri::Scheme, Method, Request, Uri};
+use hyper::{
+    body::{Body, Bytes},
+    http::uri::Scheme,
+    Method, Request, Uri,
+};
 use hyper_util::rt::TokioIo;
 use log::{debug, error};
 use reqwest::Url;
 use std::{
     collections::HashMap,
+    fmt::Debug,
+    future::Future,
     str::FromStr,
     sync::{Arc, Mutex},
 };
@@ -40,7 +58,7 @@ pub trait MainClient<C: Client>: Send + Sync + Clone {
     fn isolated_client(&self) -> C;
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum WorkerType {
     Http,
     Browser,
@@ -239,4 +257,179 @@ impl MainClient<CStandardClient> for MainCStandardClient {
             client: reqwest::Client::new(),
         }
     }
+}
+
+pub type StartInstant = quanta::Instant;
+
+pub enum WorkerLogicAction<P: PlatformT> {
+    RenewClient,
+    Nothing,
+    ProcessJob((StartInstant, Job<NotRequested, P>)),
+}
+
+pub async fn worker_job_logic_start<P, D>(
+    worker_id: u16,
+    job: Job<NotRequested, P>,
+    platforms: &mut HashMap<P, D>,
+    monitor: &Sender<Event<P>>,
+    requeue_job: &Sender<WorkerAction<P>>,
+) -> Result<WorkerLogicAction<P>>
+where
+    P: PlatformT,
+    D: PlatformHistory,
+{
+    let ts_start = quanta::Instant::now();
+    let job_platform = job.platform;
+    let platform = platforms.get_mut(&job.platform).unwrap();
+    match platform.can_request(ts_start) {
+        PlatformCanRequest::Ok => {
+            return Ok(WorkerLogicAction::ProcessJob((ts_start, job)));
+        }
+        PlatformCanRequest::MustWait => {
+            debug!("Rate limiting for http worker {}", worker_id);
+            // Return the job so another worker can process it, or we can retry later
+
+            requeue_job
+                .send(WorkerAction::Job(job))
+                .map_err(|e| {
+                    anyhow!(
+                        "Failed to requeue job in http worker {}: {:?}",
+                        worker_id,
+                        e
+                    )
+                })
+                .await?;
+
+            monitor
+                .send(Event::WorkerRateLimited(BasicWorkerInfo::new(
+                    job_platform,
+                    WorkerType::Http,
+                    worker_id,
+                    quanta::Instant::now(),
+                )))
+                .await?;
+        }
+        PlatformCanRequest::MaxRequests => {
+            debug!("Max requests for http worker {}", worker_id);
+            // Return the job so another worker can process it, or we can retry later
+
+            requeue_job
+                .send(WorkerAction::Job(job))
+                .map_err(|e| {
+                    anyhow!(
+                        "Failed to requeue job in http worker {}: {:?}",
+                        worker_id,
+                        e
+                    )
+                })
+                .await?;
+
+            // Reset all platforms so we can make more requests
+            for (_, platform) in platforms.iter_mut() {
+                platform.reset();
+            }
+
+            monitor
+                .send(Event::WorkerRenewingClient(BasicWorkerInfo::new(
+                    job_platform,
+                    WorkerType::Http,
+                    worker_id,
+                    quanta::Instant::now(),
+                )))
+                .await?;
+            return Ok(WorkerLogicAction::RenewClient);
+        }
+    }
+    Ok(WorkerLogicAction::Nothing)
+}
+
+pub async fn worker_job_logic_process<P, D>(
+    ts_start: StartInstant,
+    worker_id: u16,
+    worker_type: WorkerType,
+    original_job: Job<NotRequested, P>,
+    new_jobs: Vec<QueueJob<P>>,
+    platforms: &mut HashMap<P, D>,
+    monitor: &Sender<Event<P>>,
+    queue_job: &Sender<QueueJob<P>>,
+    request_job: &Sender<QueueJobStatus>,
+) -> Result<()>
+where
+    P: PlatformT,
+    D: PlatformHistory,
+{
+    let platform = platforms.get_mut(&original_job.platform).unwrap();
+    let ts_end = quanta::Instant::now();
+    platform.request_complete(ts_end);
+
+    let job_hash = original_job.request.hash()?;
+
+    let mut original_job_completed = false;
+    for job in new_jobs {
+        let (current_job_hash, num_attempts, max_attempts) = job
+            .inner_job_info()?
+            .expect("Bad QueueJob sent to ConcurrentTor runtime.");
+        if current_job_hash == job_hash {
+            // We found the original job
+            if !original_job_completed {
+                // We haven't found the original job in a previous iteration
+                original_job_completed = true;
+                if num_attempts != original_job.num_attempts + 1 {
+                    panic!(
+                        "Original job has wrong number of attempts in http worker {}. \
+                        Expected {}, got {}. Do not forgot to call .into::<Job<Requests, P>>()!",
+                        worker_id,
+                        original_job.num_attempts + 1,
+                        num_attempts
+                    );
+                }
+                monitor
+                    .send(Event::ProcessedJob(ProcessedJobInfo::new(
+                        original_job.platform,
+                        worker_type,
+                        worker_id,
+                        ts_start,
+                        ts_end,
+                        job_hash,
+                        JobStatusDb::Active,
+                        num_attempts,
+                        max_attempts,
+                    )))
+                    .await?;
+            } else {
+                panic!("Original job found twice in http worker {}", worker_id);
+            }
+        }
+
+        queue_job
+            .send(job)
+            .map_err(|e| {
+                anyhow!(
+                    "Failed to send job to queue in http worker {}: {:?}",
+                    worker_id,
+                    e
+                )
+            })
+            .await?;
+    }
+
+    if !original_job_completed {
+        panic!(
+            "Original job not found in http worker {}. You must include the \
+                        original job with its updated status in the return vector! ",
+            worker_id
+        );
+    }
+
+    request_job
+        .send(QueueJobStatus::WorkerCompleted { worker_id })
+        .map_err(|e| {
+            anyhow!(
+                "Failed to send worker completed status in http worker {}: {:?}",
+                worker_id,
+                e
+            )
+        })
+        .await?;
+    Ok(())
 }

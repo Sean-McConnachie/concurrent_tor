@@ -15,10 +15,10 @@ use anyhow::anyhow;
 use async_channel::{unbounded, Sender};
 use futures_util::TryFutureExt;
 use log::info;
-use std::future::Future;
-use std::pin::Pin;
 use std::{
     collections::HashMap,
+    future::Future,
+    pin::Pin,
     sync::{atomic::AtomicBool, Arc},
 };
 use tokio::task::JoinHandle;
@@ -104,17 +104,23 @@ where
         // Build HTTP workers
         let http_workers = (0..worker_config.http_workers)
             .map(|worker_id| {
-                let platforms = http_platforms
+                let platform_data = http_platforms
                     .iter()
                     .map(|builder| {
                         let platform = builder.platform();
                         (
                             platform.clone(),
                             HttpPlatformData::new(
-                                builder.build(),
                                 http_platform_configs.get(&platform).unwrap().clone(),
                             ),
                         )
+                    })
+                    .collect::<HashMap<_, _>>();
+                let platform_impls = http_platforms
+                    .iter()
+                    .map(|builder| {
+                        let platform = builder.platform();
+                        (platform.clone(), builder.build())
                     })
                     .collect::<HashMap<_, _>>();
                 HttpWorker::new(
@@ -125,7 +131,8 @@ where
                     http_worker_tx.clone(),
                     queue_job_tx.clone(),
                     main_client.clone(),
-                    platforms,
+                    platform_data,
+                    platform_impls,
                 )
             })
             .collect::<Vec<_>>();
@@ -135,17 +142,23 @@ where
         let browser_workers: Vec<BrowserWorker<P, C, M>> = (worker_config.http_workers
             ..worker_config.http_workers + worker_config.browser_workers)
             .map(|worker_id| {
-                let platforms = browser_platforms
+                let platform_data = browser_platforms
                     .iter()
                     .map(|builder| {
                         let platform = builder.platform();
                         (
                             platform.clone(),
                             BrowserPlatformData::new(
-                                builder.build(),
                                 browser_platform_configs.get(&platform).unwrap().clone(),
                             ),
                         )
+                    })
+                    .collect::<HashMap<_, _>>();
+                let platform_impls = browser_platforms
+                    .iter()
+                    .map(|builder| {
+                        let platform = builder.platform();
+                        (platform.clone(), builder.build())
                     })
                     .collect::<HashMap<_, _>>();
                 let socks_port = STARTING_PORT + worker_id as u16;
@@ -157,7 +170,8 @@ where
                     browser_worker_tx.clone(),
                     queue_job_tx.clone(),
                     main_client.clone(),
-                    platforms,
+                    platform_data,
+                    platform_impls,
                     true, // TODO: Make this configurable
                     socks_port,
                 )

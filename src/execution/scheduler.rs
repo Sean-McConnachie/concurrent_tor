@@ -1,18 +1,17 @@
-use crate::execution::monitor::{DequeueInfo, QueueJobInfo};
 use crate::{
     config::WorkerConfig,
     database::{JobCache, JobStatusDb, DB},
-    execution::monitor::Event,
+    execution::monitor::{DequeueInfo, Event, QueueJobInfo},
     Result,
 };
 use anyhow::anyhow;
 use async_channel::{Receiver, Sender};
+use dyn_clone::DynClone;
 use futures_util::TryFutureExt;
 use log::{debug, info};
 use serde::de::DeserializeOwned;
 use std::{collections::HashMap, fmt::Debug, hash::Hash, sync::Arc};
-use tokio::sync::Mutex;
-use tokio::task::JoinHandle;
+use tokio::{sync::Mutex, task::JoinHandle};
 
 pub trait PlatformT:
     DeserializeOwned + Debug + Clone + Copy + Hash + Eq + PartialEq + Send + Sync + Unpin + 'static
@@ -24,10 +23,24 @@ pub trait PlatformT:
 
 pub type FromJsonFn = fn(&str) -> Result<Box<dyn WorkerRequest>>;
 
-pub trait WorkerRequest: Send + Debug {
+pub trait WorkerRequest: Send + Debug + DynClone {
     fn as_any(&self) -> &dyn std::any::Any;
     fn hash(&self) -> Result<u128>;
     fn as_json(&self) -> String;
+}
+dyn_clone::clone_trait_object!(WorkerRequest);
+
+pub trait PlatformHistory {
+    fn can_request(&self, now: quanta::Instant) -> PlatformCanRequest;
+    fn request_complete(&mut self, now: quanta::Instant);
+    fn reset(&mut self);
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum PlatformCanRequest {
+    Ok,
+    MustWait,
+    MaxRequests,
 }
 
 /// NotRequested means that the job has not been processed by a worker and can be processed.
@@ -97,14 +110,14 @@ where
     }
 }
 
-impl<P> From<Job<NotRequested, P>> for Job<Requested, P>
+impl<P> From<&Job<NotRequested, P>> for Job<Requested, P>
 where
     P: PlatformT,
 {
-    fn from(job: Job<NotRequested, P>) -> Self {
+    fn from(job: &Job<NotRequested, P>) -> Self {
         Job {
             platform: job.platform,
-            request: job.request,
+            request: job.request.clone(),
             num_attempts: job.num_attempts + 1,
             max_attempts: job.max_attempts,
             _status: std::marker::PhantomData,
@@ -127,6 +140,21 @@ pub enum QueueJob<P: PlatformT> {
     Retry(Job<NotRequested, P>),
     SendStopProgram,
     StopProgram,
+}
+
+impl<P> QueueJob<P>
+where
+    P: PlatformT,
+{
+    pub fn inner_job_info(&self) -> Result<Option<(u128, u32, u32)>> {
+        Ok(Some(match self {
+            QueueJob::New(job) => (job.request.hash()?, job.num_attempts, job.max_attempts),
+            QueueJob::Completed(job) => (job.request.hash()?, job.num_attempts, job.max_attempts),
+            QueueJob::Failed(job) => (job.request.hash()?, job.num_attempts, job.max_attempts),
+            QueueJob::Retry(job) => (job.request.hash()?, job.num_attempts, job.max_attempts),
+            _ => return Ok(None),
+        }))
+    }
 }
 
 pub trait Scheduler<P: PlatformT>: Send + 'static {
@@ -281,6 +309,9 @@ where
                                 job.platform,
                                 quanta::Instant::now(),
                                 job_hash,
+                                JobStatusDb::Active, // behaviour of [insert_new]
+                                job.num_attempts,
+                                job.max_attempts,
                             )))
                             .await?;
                         scheduler.lock().await.enqueue(job);
@@ -309,6 +340,9 @@ where
                             job.platform,
                             quanta::Instant::now(),
                             job_hash,
+                            JobStatusDb::Completed, // behaviour of [update_status_by_hash] in this context
+                            job.num_attempts,
+                            job.num_attempts,
                         )))
                         .await?;
                 }
@@ -326,6 +360,9 @@ where
                             job.platform,
                             quanta::Instant::now(),
                             job_hash,
+                            JobStatusDb::Failed, // behaviour of [update_status_by_hash] in this context
+                            job.num_attempts,
+                            job.max_attempts,
                         )))
                         .await?;
                 }
@@ -344,6 +381,9 @@ where
                                 job.platform,
                                 quanta::Instant::now(),
                                 job_hash,
+                                JobStatusDb::Active, // behaviour of [update_status_by_hash] in this context
+                                job.num_attempts,
+                                job.max_attempts,
                             )))
                             .await?;
                         scheduler.lock().await.enqueue(job);

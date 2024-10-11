@@ -1,12 +1,15 @@
-use crate::execution::client::WorkerType;
-use crate::execution::monitor::{BasicWorkerInfo, ProcessedJobInfo};
 use crate::{
     config::HttpPlatformConfig,
+    database::JobStatusDb,
     execution::{
-        client::{Client, MainClient},
-        monitor::Event,
+        client::{
+            worker_job_logic_process, worker_job_logic_start, Client, MainClient,
+            WorkerLogicAction, WorkerType,
+        },
+        monitor::{BasicWorkerInfo, Event, ProcessedJobInfo},
         scheduler::{
-            Job, NotRequested, PlatformT, QueueJob, QueueJobStatus, Requested, WorkerAction,
+            Job, NotRequested, PlatformCanRequest, PlatformHistory, PlatformT, QueueJob,
+            QueueJobStatus, Requested, WorkerAction,
         },
     },
     Result,
@@ -27,7 +30,7 @@ pub trait HttpPlatformBuilder<P: PlatformT, C: Client>: Send {
 #[async_trait]
 pub trait HttpPlatform<P: PlatformT, C: Client>: Send {
     /// Function should not fail when passed back to the API. Therefore, it should handle all errors itself.
-    async fn process_job(&self, job: Job<NotRequested, P>, client: &C) -> Vec<QueueJob<P>>;
+    async fn process_job(&self, job: &Job<NotRequested, P>, client: &C) -> Vec<QueueJob<P>>;
 }
 
 #[derive(Debug)]
@@ -49,36 +52,32 @@ enum HttpPlatformBehaviourError {
     MaxRequests,
 }
 
-pub struct HttpPlatformData<P: PlatformT, C: Client> {
-    platform_impl: Box<dyn HttpPlatform<P, C>>,
+pub struct HttpPlatformData {
     config: HttpPlatformConfig,
     last_request: quanta::Instant,
     requests: u32,
 }
 
-impl<P, C> HttpPlatformData<P, C>
-where
-    P: PlatformT,
-    C: Client,
-{
-    pub fn new(platform_impl: Box<dyn HttpPlatform<P, C>>, config: HttpPlatformConfig) -> Self {
+impl HttpPlatformData {
+    pub fn new(config: HttpPlatformConfig) -> Self {
         HttpPlatformData {
-            platform_impl,
             config,
             last_request: quanta::Instant::now(),
             requests: 0,
         }
     }
+}
 
-    fn can_request(&self, now: quanta::Instant) -> HttpPlatformBehaviourError {
+impl PlatformHistory for HttpPlatformData {
+    fn can_request(&self, now: quanta::Instant) -> PlatformCanRequest {
         let diff = now - self.last_request;
         if self.requests >= self.config.max_requests {
-            return HttpPlatformBehaviourError::MaxRequests;
+            return PlatformCanRequest::MaxRequests;
         }
         if diff.as_micros() > (self.config.timeout_ms as u128) * 1000 {
-            return HttpPlatformBehaviourError::Ok;
+            return PlatformCanRequest::Ok;
         }
-        HttpPlatformBehaviourError::MustWait
+        PlatformCanRequest::MustWait
     }
 
     fn request_complete(&mut self, now: quanta::Instant) {
@@ -108,7 +107,9 @@ pub struct HttpWorker<P: PlatformT, C: Client, M: MainClient<C>> {
     /// Here to query a new client when necessary
     main_client: M,
     /// Platforms that store [HttpPlatform], the last request time, and the number of requests.
-    platforms: HashMap<P, HttpPlatformData<P, C>>,
+    platform_data: HashMap<P, HttpPlatformData>,
+    /// The platform implementation
+    platform_impls: HashMap<P, Box<dyn HttpPlatform<P, C>>>,
 }
 
 impl<P, C, M> HttpWorker<P, C, M>
@@ -125,7 +126,8 @@ where
         requeue_job: Sender<WorkerAction<P>>,
         queue_job: Sender<QueueJob<P>>,
         main_client: M,
-        platforms: HashMap<P, HttpPlatformData<P, C>>,
+        platform_data: HashMap<P, HttpPlatformData>,
+        platform_impls: HashMap<P, Box<dyn HttpPlatform<P, C>>>,
     ) -> Self {
         debug!("Creating http worker {}", worker_id);
         HttpWorker {
@@ -137,7 +139,8 @@ where
             queue_job,
             client: main_client.isolated_client(),
             main_client,
-            platforms,
+            platform_data,
+            platform_impls,
         }
     }
 
@@ -148,7 +151,7 @@ where
     }
 
     pub(crate) async fn start(mut self) -> Result<()> {
-        debug!("Starting worker {}", self.worker_id);
+        info!("Starting http worker {}", self.worker_id);
         loop {
             let action = self.recv_job.recv().await?;
             let job = match action {
@@ -158,111 +161,41 @@ where
                 }
             };
 
-            let ts_start = quanta::Instant::now();
-            let platform = self.platforms.get_mut(&job.platform).unwrap();
-            let job_platform = job.platform;
-            match platform.can_request(ts_start) {
-                HttpPlatformBehaviourError::Ok => {
-                    debug!("Processing job for http worker {}", self.worker_id);
-                    let job_hash = job.request.hash()?;
-
-                    let jobs = platform.platform_impl.process_job(job, &self.client).await;
-                    let ts_end = quanta::Instant::now();
-                    self.monitor
-                        .send(Event::ProcessedJob(ProcessedJobInfo::new(
-                            job_platform,
-                            WorkerType::Http,
-                            self.worker_id,
-                            ts_start,
-                            ts_end,
-                            job_hash,
-                        )))
-                        .await?;
-                    platform.request_complete(ts_end);
-
-                    for job in jobs {
-                        self.queue_job
-                            .send(job)
-                            .map_err(|e| {
-                                anyhow!(
-                                    "Failed to send job to queue in http worker {}: {:?}",
-                                    self.worker_id,
-                                    e
-                                )
-                            })
-                            .await?;
-                    }
-                    self.request_job
-                        .send(QueueJobStatus::WorkerCompleted {
-                            worker_id: self.worker_id,
-                        })
-                        .map_err(|e| {
-                            anyhow!(
-                                "Failed to send worker completed status in http worker {}: {:?}",
-                                self.worker_id,
-                                e
-                            )
-                        })
-                        .await?;
-                }
-                HttpPlatformBehaviourError::MustWait => {
-                    debug!("Rate limiting for http worker {}", self.worker_id);
-                    // Return the job so another worker can process it, or we can retry later
-
-                    self.requeue_job
-                        .send(WorkerAction::Job(job))
-                        .map_err(|e| {
-                            anyhow!(
-                                "Failed to requeue job in http worker {}: {:?}",
-                                self.worker_id,
-                                e
-                            )
-                        })
-                        .await?;
-
-                    self.monitor
-                        .send(Event::WorkerRateLimited(BasicWorkerInfo::new(
-                            job_platform,
-                            WorkerType::Http,
-                            self.worker_id,
-                            quanta::Instant::now(),
-                        )))
-                        .await?;
-                }
-                HttpPlatformBehaviourError::MaxRequests => {
-                    debug!("Max requests for http worker {}", self.worker_id);
-                    // Return the job so another worker can process it, or we can retry later
-
-                    self.requeue_job
-                        .send(WorkerAction::Job(job))
-                        .map_err(|e| {
-                            anyhow!(
-                                "Failed to requeue job in http worker {}: {:?}",
-                                self.worker_id,
-                                e
-                            )
-                        })
-                        .await?;
-
-                    // Renew the client so we get a new IP
+            match worker_job_logic_start(
+                self.worker_id,
+                job,
+                &mut self.platform_data,
+                &self.monitor,
+                &self.requeue_job,
+            )
+            .await?
+            {
+                WorkerLogicAction::Nothing => {}
+                WorkerLogicAction::RenewClient => {
                     self = self.renew_client()?;
-                    // Reset all platforms so we can make more requests
-                    for (_, platform) in self.platforms.iter_mut() {
-                        platform.reset();
-                    }
-
-                    self.monitor
-                        .send(Event::WorkerRenewingClient(BasicWorkerInfo::new(
-                            job_platform,
-                            WorkerType::Http,
-                            self.worker_id,
-                            quanta::Instant::now(),
-                        )))
-                        .await?;
+                }
+                WorkerLogicAction::ProcessJob((ts_start, job)) => {
+                    let jobs = self
+                        .platform_impls
+                        .get(&job.platform)
+                        .unwrap()
+                        .process_job(&job, &self.client)
+                        .await;
+                    worker_job_logic_process(
+                        ts_start,
+                        self.worker_id,
+                        WorkerType::Http,
+                        job,
+                        jobs,
+                        &mut self.platform_data,
+                        &self.monitor,
+                        &self.queue_job,
+                        &self.request_job,
+                    )
+                    .await?;
                 }
             }
         }
-        info!("Stopping http worker {}", self.worker_id);
         Ok(())
     }
 }

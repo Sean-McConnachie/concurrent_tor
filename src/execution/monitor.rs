@@ -1,16 +1,22 @@
-use crate::execution::client::WorkerType;
-use crate::{execution::scheduler::PlatformT, Result};
+use crate::{
+    database::JobStatusDb,
+    execution::{client::WorkerType, scheduler::PlatformT},
+    Result,
+};
 use async_channel::Receiver;
 use async_trait::async_trait;
 
 #[derive(Debug)]
 pub struct ProcessedJobInfo<P: PlatformT> {
     pub platform: P,
+    pub status: JobStatusDb,
     pub worker_type: WorkerType,
     pub worker_id: u16,
     pub ts_start: quanta::Instant,
     pub ts_end: quanta::Instant,
     pub job_hash: u128,
+    pub num_attempts: u32,
+    pub max_attempts: u32,
 }
 
 impl<P> ProcessedJobInfo<P>
@@ -24,6 +30,9 @@ where
         ts_start: quanta::Instant,
         ts_end: quanta::Instant,
         job_hash: u128,
+        status: JobStatusDb,
+        num_attempts: u32,
+        max_attempts: u32,
     ) -> Self {
         ProcessedJobInfo {
             platform,
@@ -32,6 +41,9 @@ where
             ts_start,
             ts_end,
             job_hash,
+            status,
+            num_attempts,
+            max_attempts,
         }
     }
 }
@@ -61,19 +73,32 @@ where
 #[derive(Debug)]
 pub struct QueueJobInfo<P: PlatformT> {
     pub platform: P,
+    pub job_status_db: JobStatusDb,
     pub ts: quanta::Instant,
     pub job_hash: u128,
+    pub num_attempts: u32,
+    pub max_attempts: u32,
 }
 
 impl<P> QueueJobInfo<P>
 where
     P: PlatformT,
 {
-    pub fn new(platform: P, ts: quanta::Instant, job_hash: u128) -> Self {
+    pub fn new(
+        platform: P,
+        ts: quanta::Instant,
+        job_hash: u128,
+        job_status_db: JobStatusDb,
+        num_attempts: u32,
+        max_attempts: u32,
+    ) -> Self {
         QueueJobInfo {
             platform,
             ts,
             job_hash,
+            job_status_db,
+            num_attempts,
+            max_attempts,
         }
     }
 }
