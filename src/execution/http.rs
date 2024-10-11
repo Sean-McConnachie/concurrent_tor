@@ -2,6 +2,7 @@ use crate::{
     config::HttpPlatformConfig,
     execution::{
         client::{Client, MainClient},
+        monitor::Event,
         scheduler::{
             Job, NotRequested, PlatformT, QueueJob, QueueJobStatus, Requested, WorkerAction,
         },
@@ -91,7 +92,9 @@ where
 }
 
 pub struct HttpWorker<P: PlatformT, C: Client, M: MainClient<C>> {
-    worker_id: u32,
+    worker_id: u16,
+    /// Monitor to send events to
+    monitor: Sender<Event<P>>,
     /// Request job from a queue
     request_job: Sender<QueueJobStatus>,
     /// Receive job from a queue
@@ -115,7 +118,8 @@ where
     M: MainClient<C>,
 {
     pub fn new(
-        worker_id: u32,
+        worker_id: u16,
+        monitor: Sender<Event<P>>,
         request_job: Sender<QueueJobStatus>,
         recv_job: Receiver<WorkerAction<P>>,
         requeue_job: Sender<WorkerAction<P>>,
@@ -126,6 +130,7 @@ where
         debug!("Creating http worker {}", worker_id);
         HttpWorker {
             worker_id,
+            monitor,
             request_job,
             recv_job,
             requeue_job,

@@ -4,28 +4,29 @@ use crate::{
     execution::{
         browser::{BrowserPlatformBuilder, BrowserPlatformData, BrowserWorker},
         client::{Client, MainClient},
-        cron::{CronPlatform, CronPlatformBuilder},
+        cron::CronPlatformBuilder,
         http::{HttpPlatformBuilder, HttpPlatformData, HttpWorker},
-        scheduler::{
-            Job, JobDistributor, NotRequested, PlatformT, QueueJob, QueueJobStatus, Scheduler,
-            WorkerAction,
-        },
+        monitor::{Event, Monitor},
+        scheduler::{JobDistributor, PlatformT, QueueJob, QueueJobStatus, Scheduler, WorkerAction},
     },
     Result,
 };
 use anyhow::anyhow;
 use crossbeam::channel::{unbounded, Sender};
 use log::info;
-use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{atomic::AtomicBool, Arc},
+};
 use tokio::task::JoinHandle;
 
 pub struct CTRuntime<P: PlatformT> {
+    event_tx: Sender<Event<P>>,
     stop_queue_worker: Sender<QueueJob<P>>,
     stop_cron_flag: Arc<AtomicBool>,
     queue_handles: [JoinHandle<Result<()>>; 2],
     join_handles: Vec<JoinHandle<Result<()>>>,
+    monitor_handle: JoinHandle<Result<()>>,
 }
 
 impl<P> CTRuntime<P>
@@ -36,8 +37,10 @@ where
         S: Scheduler<P>,
         C: Client + 'static,
         M: MainClient<C> + 'static,
+        T: Monitor<P> + 'static,
     >(
         worker_config: WorkerConfig,
+        monitor: T,
         scheduler: S,
         main_client: M,
 
@@ -51,24 +54,27 @@ where
     ) -> Result<Self> {
         let pool = connect_and_init_db().await?;
 
+        let (monitor_tx, monitor_rx) = unbounded::<Event<P>>();
         let (request_job_tx, request_job_rx) = unbounded::<QueueJobStatus>();
         let (queue_job_tx, queue_job_rx) = unbounded::<QueueJob<P>>();
 
         let (http_worker_tx, http_worker_rx) = unbounded::<WorkerAction<P>>();
         let (browser_worker_tx, browser_worker_rx) = unbounded::<WorkerAction<P>>();
 
+        // Start monitor
+        let monitor_handle = tokio::task::spawn(monitor.start(monitor_rx));
+
         // Build JobDistributor
         let job_distributor = {
             let mut txs = HashMap::new();
             for http_platform in http_platforms.iter() {
-                let p = http_platform.platform();
                 txs.insert(http_platform.platform(), http_worker_tx.clone());
             }
             for browser_platform in browser_platforms.iter() {
-                let p = browser_platform.platform();
                 txs.insert(browser_platform.platform(), browser_worker_tx.clone());
             }
             JobDistributor::new(
+                monitor_tx.clone(),
                 pool,
                 request_job_rx,
                 request_job_tx.clone(),
@@ -110,6 +116,7 @@ where
                     .collect::<HashMap<_, _>>();
                 HttpWorker::new(
                     worker_id,
+                    monitor_tx.clone(),
                     request_job_tx.clone(),
                     http_worker_rx.clone(),
                     http_worker_tx.clone(),
@@ -140,6 +147,7 @@ where
                 let socks_port = STARTING_PORT + worker_id as u16;
                 BrowserWorker::new(
                     worker_id,
+                    monitor_tx.clone(),
                     request_job_tx.clone(),
                     browser_worker_rx.clone(),
                     browser_worker_tx.clone(),
@@ -171,10 +179,12 @@ where
         let queue_handles = job_distributor.start();
 
         Ok(CTRuntime {
+            event_tx: monitor_tx,
             stop_queue_worker: queue_job_tx,
             stop_cron_flag,
             queue_handles,
             join_handles: handles,
+            monitor_handle,
         })
     }
 
@@ -192,6 +202,11 @@ where
             handle.await??;
             info!("Joined queue handle {}/{n_queue_handles}", i + 1);
         }
+        self.event_tx
+            .send(Event::StopMonitor)
+            .map_err(|e| anyhow!("Failed to send stop event to monitor: {:?}", e))?;
+        self.monitor_handle.await??;
+        info!("Joined monitor handle");
         Ok(())
     }
 

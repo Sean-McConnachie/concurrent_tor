@@ -2,6 +2,7 @@ use crate::{
     config::BrowserPlatformConfig,
     execution::{
         client::{Client, MainClient},
+        monitor::Event,
         scheduler::{Job, NotRequested, PlatformT, QueueJob, QueueJobStatus, WorkerAction},
     },
     Result,
@@ -12,8 +13,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use crossbeam::channel::{Receiver, Sender};
 use headless_chrome::{Browser, LaunchOptions, Tab};
 use log::{debug, info};
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 use tokio::task::JoinHandle;
 
 pub trait BrowserPlatformBuilder<P: PlatformT> {
@@ -77,7 +77,9 @@ where
 }
 
 pub struct BrowserWorker<P: PlatformT, C: Client, M: MainClient<C>> {
-    worker_id: u32,
+    worker_id: u16,
+    /// Monitor to send events to
+    monitor: Sender<Event<P>>,
     /// Request job from a queue
     request_job: Sender<QueueJobStatus>,
     /// Receive job from a queue
@@ -94,8 +96,6 @@ pub struct BrowserWorker<P: PlatformT, C: Client, M: MainClient<C>> {
     proxy_handle: JoinHandle<()>,
     /// Browser handle
     browser: Browser,
-    /// Tab handle to keep browser alive
-    tab: Arc<Tab>,
     #[allow(dead_code)]
     /// Headless mode
     headless: bool,
@@ -111,7 +111,8 @@ where
     M: MainClient<C>,
 {
     pub fn new(
-        worker_id: u32,
+        worker_id: u16,
+        monitor: Sender<Event<P>>,
         request_job: Sender<QueueJobStatus>,
         recv_job: Receiver<WorkerAction<P>>,
         requeue_job: Sender<WorkerAction<P>>,
@@ -134,6 +135,7 @@ where
         let browser = Browser::new(browser_opts)?;
         Ok(BrowserWorker {
             worker_id,
+            monitor,
             request_job,
             recv_job,
             requeue_job,
@@ -141,7 +143,6 @@ where
             proxy_handle: Self::start_proxy_handle(worker_id, &main_client, port),
             main_client,
             platforms,
-            tab: browser.new_tab()?,
             browser,
             headless,
             port,
@@ -153,7 +154,7 @@ where
         format!("socks5://localhost:{}", port)
     }
 
-    fn start_proxy_handle(worker_id: u32, main_client: &M, port: u16) -> JoinHandle<()> {
+    fn start_proxy_handle(worker_id: u16, main_client: &M, port: u16) -> JoinHandle<()> {
         debug!("Starting proxy for browser worker {}", worker_id);
         if M::use_proxy() {
             let client = main_client.isolated_client();

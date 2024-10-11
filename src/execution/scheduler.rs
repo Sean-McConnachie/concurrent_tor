@@ -1,16 +1,19 @@
 use crate::{
     config::WorkerConfig,
     database::{JobCache, JobStatusDb, DB},
+    execution::monitor::Event,
     Result,
 };
 use anyhow::anyhow;
 use crossbeam::channel::{Receiver, Sender};
 use log::{debug, info};
 use serde::de::DeserializeOwned;
-use std::collections::HashMap;
-use std::fmt::Debug;
-use std::hash::Hash;
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashMap,
+    fmt::Debug,
+    hash::Hash,
+    sync::{Arc, Mutex},
+};
 use tokio::task::JoinHandle;
 
 pub trait PlatformT:
@@ -126,13 +129,15 @@ pub trait Scheduler<P: PlatformT>: Send + 'static {
 
 #[derive(Debug)]
 pub enum QueueJobStatus {
-    WorkerCompleted { worker_id: u32 },
+    WorkerCompleted { worker_id: u16 },
     NewJobArrived,
     SendStopProgram,
     StopProgram,
 }
 
 pub struct JobDistributor<S: Scheduler<P>, P: PlatformT> {
+    /// Monitor
+    monitor: Sender<Event<P>>,
     db: DB,
     /// Receive signal from a worker to enqueue a job.
     request_job: Receiver<QueueJobStatus>,
@@ -158,6 +163,7 @@ where
     // TODO: Fix target circulation
     // TODO: Check if there are duplicate jobs in the queue - remove if so
     pub fn new(
+        monitor: Sender<Event<P>>,
         db: DB,
         request_job: Receiver<QueueJobStatus>,
         notify_new_job: Sender<QueueJobStatus>,
@@ -169,6 +175,7 @@ where
         worker_config: WorkerConfig,
     ) -> Self {
         JobDistributor {
+            monitor,
             db,
             request_job,
             notify_new_job,
@@ -183,11 +190,20 @@ where
 
     pub(super) fn start(self) -> [JoinHandle<Result<()>>; 2] {
         let scheduler = self.scheduler.clone();
+        let monitor_clone = self.monitor.clone();
         let enqueue_thread = tokio::task::spawn(async move {
-            Self::loop_enqueue(self.db, self.queue_job, self.notify_new_job, scheduler).await
+            Self::loop_enqueue(
+                monitor_clone,
+                self.db,
+                self.queue_job,
+                self.notify_new_job,
+                scheduler,
+            )
+            .await
         });
         let dequeue_thread = tokio::task::spawn_blocking(move || {
             Self::loop_dequeue(
+                self.monitor,
                 self.request_job,
                 self.dequeue_job,
                 self.http_tx,
@@ -200,6 +216,7 @@ where
     }
 
     async fn loop_enqueue(
+        monitor: Sender<Event<P>>,
         mut db: DB,
         queue_job: Receiver<QueueJob<P>>,
         notify_new_job: Sender<QueueJobStatus>,
@@ -313,10 +330,11 @@ where
     }
 
     fn loop_dequeue(
+        monitor: Sender<Event<P>>,
         request_job: Receiver<QueueJobStatus>,
         dequeue_job: HashMap<P, Sender<WorkerAction<P>>>,
-        mut http_tx: Sender<WorkerAction<P>>,
-        mut browser_tx: Sender<WorkerAction<P>>,
+        http_tx: Sender<WorkerAction<P>>,
+        browser_tx: Sender<WorkerAction<P>>,
         scheduler: Arc<Mutex<S>>,
         worker_config: WorkerConfig,
     ) -> Result<()> {

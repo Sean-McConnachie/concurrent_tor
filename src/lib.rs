@@ -10,6 +10,7 @@ pub use utils::*;
 pub mod exports {
     pub use arti_client::{TorClient, TorClientConfig};
     pub use async_trait::async_trait;
+    pub use crossbeam::channel::Receiver as CrossbeamReceiver;
     pub use crossbeam::channel::Sender as CrossbeamSender;
     pub use headless_chrome;
     pub use http_body_util::BodyExt as HttpBodyUtilBodyExt;

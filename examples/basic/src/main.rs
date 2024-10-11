@@ -1,6 +1,7 @@
 use concurrent_tor::{
     config::ScraperConfig,
     execution::{
+        monitor::EmptyMonitor,
         runtime::CTRuntime,
         scheduler::{PlatformT, SimpleScheduler, WorkerRequest},
     },
@@ -308,6 +309,39 @@ mod browser {
     }
 }
 
+mod monitor {
+    use crate::Platform;
+    use concurrent_tor::{
+        execution::monitor::{Event, Monitor},
+        exports::{async_trait, CrossbeamReceiver},
+    };
+
+    pub struct MyMonitor {}
+
+    impl MyMonitor {
+        pub fn new() -> Self {
+            MyMonitor {}
+        }
+    }
+
+    #[async_trait]
+    impl Monitor<Platform> for MyMonitor {
+        async fn start(
+            self,
+            event_rx: CrossbeamReceiver<Event<Platform>>,
+        ) -> concurrent_tor::Result<()> {
+            loop {
+                let event = event_rx.recv().unwrap();
+                if let Event::StopMonitor = event {
+                    break;
+                }
+                println!("Monitor event: {:?}", event);
+            }
+            Ok(())
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenv::dotenv().ok();
@@ -317,6 +351,7 @@ async fn main() -> Result<()> {
     let config = ScraperConfig::init("Config.toml")?;
     let rt = CTRuntime::run_scraper_runtime(
         config.workers,
+        monitor::MyMonitor::new(),
         SimpleScheduler::new(),
         build_main_client().await?,
         vec![cron_box(cron::IpCronBuilder::new())],
@@ -329,7 +364,7 @@ async fn main() -> Result<()> {
 
     let stop = rt.graceful_stop();
     tokio::task::spawn(async move {
-        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
         stop().expect("Failed to stop runtime");
     });
 

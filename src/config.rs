@@ -5,9 +5,9 @@ use std::{collections::HashMap, hash::Hash};
 #[derive(Deserialize, Clone, Debug)]
 pub struct WorkerConfig {
     pub target_circulation: u32,
-    pub http_workers: u32,
+    pub http_workers: u16,
     // pub browser_workers: u32,
-    pub browser_workers: u32,
+    pub browser_workers: u16,
 }
 
 /// Configuration for every platform

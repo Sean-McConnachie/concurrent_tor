@@ -8,13 +8,15 @@ use hyper::{body::Bytes, http::uri::Scheme, Method, Request, Uri};
 use hyper_util::rt::TokioIo;
 use log::{debug, error};
 use reqwest::Url;
-use std::str::FromStr;
 use std::{
     collections::HashMap,
+    str::FromStr,
     sync::{Arc, Mutex},
 };
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::task::JoinHandle;
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    task::JoinHandle,
+};
 use tokio_native_tls::native_tls::TlsConnector;
 use tor_config::Listen;
 use tor_rtcompat::PreferredRuntime;
