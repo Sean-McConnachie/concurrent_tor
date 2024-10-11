@@ -21,7 +21,7 @@ pub trait HttpPlatformBuilder<P: PlatformT, C: Client> {
 #[async_trait]
 pub trait HttpPlatform<P: PlatformT, C: Client>: Send {
     /// Function should not fail when passed back to the API. Therefore, it should handle all errors itself.
-    fn process_job(&self, job: Job<NotRequested, P>, client: &C) -> Vec<QueueJob<P>>;
+    async fn process_job(&self, job: Job<NotRequested, P>, client: &C) -> Vec<QueueJob<P>>;
 }
 
 #[derive(Debug)]
@@ -147,7 +147,7 @@ where
             match platform.can_request() {
                 HttpPlatformBehaviourError::Ok => {
                     debug!("Processing job for http worker {}", self.worker_id);
-                    let jobs = platform.platform_impl.process_job(job, &self.client);
+                    let jobs = platform.platform_impl.process_job(job, &self.client).await;
                     platform.request_complete();
                     for job in jobs {
                         self.queue_job.send(job)?;

@@ -51,9 +51,11 @@ pub async fn run_scraper_runtime<
     let job_distributor = {
         let mut txs = HashMap::new();
         for http_platform in http_platforms.iter() {
+            let p = http_platform.platform();
             txs.insert(http_platform.platform(), http_worker_tx.clone());
         }
         for browser_platform in browser_platforms.iter() {
+            let p = browser_platform.platform();
             txs.insert(browser_platform.platform(), browser_worker_tx.clone());
         }
         JobDistributor::new(

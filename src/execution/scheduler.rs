@@ -282,20 +282,20 @@ where
     }
 }
 
-pub struct QueueScheduler<P: PlatformT> {
+pub struct SimpleScheduler<P: PlatformT> {
     queue: Vec<Job<NotRequested, P>>,
 }
 
-impl<P> QueueScheduler<P>
+impl<P> SimpleScheduler<P>
 where
     P: PlatformT,
 {
     pub fn new() -> Self {
-        QueueScheduler { queue: Vec::new() }
+        SimpleScheduler { queue: Vec::new() }
     }
 }
 
-impl<P> Scheduler<P> for QueueScheduler<P>
+impl<P> Scheduler<P> for SimpleScheduler<P>
 where
     P: PlatformT,
 {

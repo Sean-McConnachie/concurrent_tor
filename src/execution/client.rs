@@ -8,6 +8,7 @@ use hyper::{body::Bytes, http::uri::Scheme, Method, Request, Uri};
 use hyper_util::rt::TokioIo;
 use log::{debug, error};
 use reqwest::Url;
+use std::str::FromStr;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -24,8 +25,8 @@ pub trait Client: Send + Sync {
 
     async fn make_request(
         &self,
-        uri: &Uri,
         method: Method,
+        uri: &str,
         headers: Option<HashMap<String, String>>,
     ) -> Result<HttpResponse>;
 }
@@ -95,10 +96,11 @@ impl Client for CTorClient {
 
     async fn make_request(
         &self,
-        uri: &Uri,
         method: Method,
+        uri: &str,
         headers: Option<HashMap<String, String>>,
     ) -> Result<HttpResponse> {
+        let uri = Uri::from_str(uri).map_err(|e| anyhow!("Failed to parse URI: {:?}", e))?;
         let host = uri.host().unwrap();
         let https = uri.scheme() == Some(&Scheme::HTTPS);
         let port = match uri.port_u16() {
@@ -160,14 +162,12 @@ impl Client for CStandardClient {
 
     async fn make_request(
         &self,
-        uri: &Uri,
         method: Method,
+        uri: &str,
         headers: Option<HashMap<String, String>>,
     ) -> Result<HttpResponse> {
-        let mut request = self.client.request(
-            method,
-            Url::parse(&uri.to_string()).map_err(|e| anyhow!("Failed to parse URI: {:?}", e))?,
-        );
+        let url = Url::parse(uri).map_err(|e| anyhow!("Failed to parse URI: {:?}", e))?;
+        let mut request = self.client.request(method, url);
         if let Some(headers) = headers {
             for (key, value) in headers.iter() {
                 request = request.header(key, value);

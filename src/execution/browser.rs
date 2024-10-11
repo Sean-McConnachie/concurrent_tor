@@ -12,6 +12,7 @@ use crossbeam::channel::{Receiver, Sender};
 use headless_chrome::{Browser, LaunchOptions, Tab};
 use log::debug;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::task::JoinHandle;
 
 pub trait BrowserPlatformBuilder<P: PlatformT> {
@@ -22,7 +23,7 @@ pub trait BrowserPlatformBuilder<P: PlatformT> {
 #[async_trait]
 pub trait BrowserPlatform<P: PlatformT>: Send {
     /// Function should not fail when passed back to the API. Therefore, it should handle all errors itself.
-    async fn process_job(&self, job: Job<NotRequested, P>, tab: &Tab) -> Vec<QueueJob<P>>;
+    async fn process_job(&self, job: Job<NotRequested, P>, tab: Arc<Tab>) -> Vec<QueueJob<P>>;
 }
 
 enum BrowserPlatformBehaviourError {
@@ -179,7 +180,7 @@ where
                 BrowserPlatformBehaviourError::Ok => {
                     debug!("Processing job for browser worker {}", self.worker_id);
                     let tab = self.browser.new_tab()?;
-                    let jobs = platform.platform_impl.process_job(job, &tab).await;
+                    let jobs = platform.platform_impl.process_job(job, tab).await;
                     platform.request_complete();
                     for job in jobs {
                         self.queue_job.send(job)?;
