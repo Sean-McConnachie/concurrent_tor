@@ -2,8 +2,8 @@ use crate::{
     execution::scheduler::{PlatformT, QueueJob},
     Result,
 };
+use async_channel::Sender;
 use async_trait::async_trait;
-use crossbeam::channel::Sender;
 use std::sync::{atomic::AtomicBool, Arc};
 
 pub trait CronPlatformBuilder<P: PlatformT> {

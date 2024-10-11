@@ -1,7 +1,7 @@
 use crate::execution::client::WorkerType;
 use crate::{execution::scheduler::PlatformT, Result};
+use async_channel::Receiver;
 use async_trait::async_trait;
-use crossbeam::channel::Receiver;
 
 #[derive(Debug)]
 pub struct ProcessedJobInfo<P: PlatformT> {
@@ -141,7 +141,7 @@ where
 {
     async fn start(self, event_rx: Receiver<Event<P>>) -> Result<()> {
         loop {
-            if let Event::StopMonitor = event_rx.recv()? {
+            if let Event::StopMonitor = event_rx.recv().await? {
                 break;
             }
         }

@@ -10,8 +10,9 @@ use crate::{
     Result,
 };
 use anyhow::anyhow;
+use async_channel::{Receiver, Sender};
 use async_trait::async_trait;
-use crossbeam::channel::{Receiver, Sender};
+use futures_util::TryFutureExt;
 use headless_chrome::{Browser, LaunchOptions, Tab};
 use log::{debug, info};
 use std::{collections::HashMap, sync::Arc};
@@ -178,7 +179,7 @@ where
     pub(crate) async fn start(mut self) -> Result<()> {
         debug!("Starting worker {}", self.worker_id);
         loop {
-            let action = self.recv_job.recv()?;
+            let action = self.recv_job.recv().await?;
             let job = match action {
                 WorkerAction::Job(job) => job,
                 WorkerAction::StopProgram => {
@@ -205,30 +206,37 @@ where
                             ts_start,
                             ts_end,
                             job_hash,
-                        )))?;
+                        )))
+                        .await?;
                     platform.request_complete(ts_end);
 
                     for job in jobs {
-                        self.queue_job.send(job).map_err(|e| {
-                            anyhow!(
-                                "Failed to send job to queue in browser worker {}: {:?}",
-                                self.worker_id,
-                                e
-                            )
-                        })?;
+                        self.queue_job
+                            .send(job)
+                            .map_err(|e| {
+                                anyhow!(
+                                    "Failed to send job to queue in browser worker {}: {:?}",
+                                    self.worker_id,
+                                    e
+                                )
+                            })
+                            .await?;
                     }
                 }
                 BrowserPlatformBehaviourError::MustWait => {
                     debug!("Rate limiting for browser worker {}", self.worker_id);
                     // Return the job so another worker can process it, or we can retry later
 
-                    self.requeue_job.send(WorkerAction::Job(job)).map_err(|e| {
-                        anyhow!(
-                            "Failed to requeue job in browser worker {}: {:?}",
-                            self.worker_id,
-                            e
-                        )
-                    })?;
+                    self.requeue_job
+                        .send(WorkerAction::Job(job))
+                        .map_err(|e| {
+                            anyhow!(
+                                "Failed to requeue job in browser worker {}: {:?}",
+                                self.worker_id,
+                                e
+                            )
+                        })
+                        .await?;
 
                     self.monitor
                         .send(Event::WorkerRateLimited(BasicWorkerInfo::new(
@@ -236,19 +244,23 @@ where
                             WorkerType::Browser,
                             self.worker_id,
                             quanta::Instant::now(),
-                        )))?;
+                        )))
+                        .await?;
                 }
                 BrowserPlatformBehaviourError::MaxRequests => {
                     debug!("Max requests for browser worker {}", self.worker_id);
                     // Return the job so another worker can process it, or we can retry later
 
-                    self.requeue_job.send(WorkerAction::Job(job)).map_err(|e| {
-                        anyhow!(
-                            "Failed to requeue job in browser worker {}: {:?}",
-                            self.worker_id,
-                            e
-                        )
-                    })?;
+                    self.requeue_job
+                        .send(WorkerAction::Job(job))
+                        .map_err(|e| {
+                            anyhow!(
+                                "Failed to requeue job in browser worker {}: {:?}",
+                                self.worker_id,
+                                e
+                            )
+                        })
+                        .await?;
 
                     // Renew the client so we get a new IP
                     self = self.renew_client()?;
@@ -263,7 +275,8 @@ where
                             WorkerType::Browser,
                             self.worker_id,
                             quanta::Instant::now(),
-                        )))?;
+                        )))
+                        .await?;
                 }
             }
             self.request_job
@@ -276,7 +289,8 @@ where
                         self.worker_id,
                         e
                     )
-                })?;
+                })
+                .await?;
         }
         info!("Stopping browser worker {}", self.worker_id);
         Ok(())

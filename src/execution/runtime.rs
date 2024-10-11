@@ -12,7 +12,8 @@ use crate::{
     Result,
 };
 use anyhow::anyhow;
-use crossbeam::channel::{unbounded, Sender};
+use async_channel::{unbounded, Sender};
+use futures_util::TryFutureExt;
 use log::info;
 use std::{
     collections::HashMap,
@@ -197,7 +198,8 @@ where
         }
         self.stop_queue_worker
             .send(QueueJob::StopProgram)
-            .map_err(|e| anyhow!("Failed to send stop program to queue in runtime: {:?}", e))?;
+            .map_err(|e| anyhow!("Failed to send stop program to queue in runtime: {:?}", e))
+            .await?;
         let n_queue_handles = self.queue_handles.len();
         for (i, handle) in self.queue_handles.into_iter().enumerate() {
             handle.await??;
@@ -205,7 +207,8 @@ where
         }
         self.event_tx
             .send(Event::StopMonitor)
-            .map_err(|e| anyhow!("Failed to send stop event to monitor: {:?}", e))?;
+            .map_err(|e| anyhow!("Failed to send stop event to monitor: {:?}", e))
+            .await?;
         self.monitor_handle.await??;
         info!("Joined monitor handle");
         Ok(())
@@ -221,9 +224,15 @@ where
             }
             info!("Stopping program");
             stop_cron_flag.store(true, std::sync::atomic::Ordering::Relaxed);
-            stop_queue_worker
-                .send(QueueJob::SendStopProgram)
-                .map_err(|e| anyhow!("Failed to send stop program to queue in runtime: {:?}", e))?;
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                stop_queue_worker
+                    .send(QueueJob::SendStopProgram)
+                    .map_err(|e| {
+                        anyhow!("Failed to send stop program to queue in runtime: {:?}", e)
+                    })
+                    .await
+            })?;
             Ok(())
         }
     }

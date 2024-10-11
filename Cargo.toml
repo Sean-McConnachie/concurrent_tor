@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 crossbeam = "0.8.4"
+async-channel = "2.3.1"
 serde = { version = "1.0.210", features = ["derive"] }
 log = "0.4.22"
 tracing-subscriber = "0.3.18"
@@ -17,6 +18,7 @@ simple_logger = "5.0.0"
 dotenv = "0.15.0"
 strum = "0.26.3"
 strum_macros = "0.26.3"
+futures-util = "0.3.31"
 
 arti-client = "0.22.0"
 http-body-util = "0.1.0"

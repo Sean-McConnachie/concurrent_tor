@@ -6,15 +6,12 @@ use crate::{
     Result,
 };
 use anyhow::anyhow;
-use crossbeam::channel::{Receiver, Sender};
+use async_channel::{Receiver, Sender};
+use futures_util::TryFutureExt;
 use log::{debug, info};
 use serde::de::DeserializeOwned;
-use std::{
-    collections::HashMap,
-    fmt::Debug,
-    hash::Hash,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashMap, fmt::Debug, hash::Hash, sync::Arc};
+use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
 pub trait PlatformT:
@@ -203,7 +200,7 @@ where
             )
             .await
         });
-        let dequeue_thread = tokio::task::spawn_blocking(move || {
+        let dequeue_thread = tokio::task::spawn(async move {
             Self::loop_dequeue(
                 self.monitor,
                 self.request_job,
@@ -213,6 +210,7 @@ where
                 self.scheduler,
                 self.worker_config,
             )
+            .await
         });
         [enqueue_thread, dequeue_thread]
     }
@@ -231,7 +229,7 @@ where
         for job in jobs {
             let request = job.platform.request_from_json(&job.request)?;
             let job = Job::new(job.platform, request, job.num_attempts as u32);
-            scheduler.lock().unwrap().enqueue(job);
+            scheduler.lock().await.enqueue(job);
             notify_new_job
                 .send(QueueJobStatus::NewJobArrived)
                 .map_err(|e| {
@@ -239,12 +237,13 @@ where
                         "Failed to send new job arrived signal in loop enqueue: {:?}",
                         e
                     )
-                })?;
+                })
+                .await?;
         }
         let mut shutting_down = false;
 
         loop {
-            let job = queue_job.recv()?;
+            let job = queue_job.recv().await?;
             match job {
                 QueueJob::New(job) => {
                     let job_hash = job.request.hash()?;
@@ -257,12 +256,14 @@ where
                     )
                     .await?;
                     if !shutting_down {
-                        monitor.send(Event::NewJob(QueueJobInfo::new(
-                            job.platform,
-                            quanta::Instant::now(),
-                            job_hash,
-                        )))?;
-                        scheduler.lock().unwrap().enqueue(job);
+                        monitor
+                            .send(Event::NewJob(QueueJobInfo::new(
+                                job.platform,
+                                quanta::Instant::now(),
+                                job_hash,
+                            )))
+                            .await?;
+                        scheduler.lock().await.enqueue(job);
                         notify_new_job
                             .send(QueueJobStatus::NewJobArrived)
                             .map_err(|e| {
@@ -270,7 +271,8 @@ where
                                     "Failed to send new job arrived signal in loop enqueue: {:?}",
                                     e
                                 )
-                            })?;
+                            })
+                            .await?;
                     }
                 }
                 QueueJob::Completed(job) => {
@@ -282,11 +284,13 @@ where
                         job.num_attempts as i32,
                     )
                     .await?;
-                    monitor.send(Event::CompletedJob(QueueJobInfo::new(
-                        job.platform,
-                        quanta::Instant::now(),
-                        job_hash,
-                    )))?;
+                    monitor
+                        .send(Event::CompletedJob(QueueJobInfo::new(
+                            job.platform,
+                            quanta::Instant::now(),
+                            job_hash,
+                        )))
+                        .await?;
                 }
                 QueueJob::Failed(job) => {
                     let job_hash = job.request.hash()?;
@@ -297,11 +301,13 @@ where
                         job.num_attempts as i32,
                     )
                     .await?;
-                    monitor.send(Event::FailedJob(QueueJobInfo::new(
-                        job.platform,
-                        quanta::Instant::now(),
-                        job_hash,
-                    )))?;
+                    monitor
+                        .send(Event::FailedJob(QueueJobInfo::new(
+                            job.platform,
+                            quanta::Instant::now(),
+                            job_hash,
+                        )))
+                        .await?;
                 }
                 QueueJob::Retry(job) => {
                     let job_hash = job.request.hash()?;
@@ -313,12 +319,14 @@ where
                     )
                     .await?;
                     if !shutting_down {
-                        monitor.send(Event::RetryJob(QueueJobInfo::new(
-                            job.platform,
-                            quanta::Instant::now(),
-                            job_hash,
-                        )))?;
-                        scheduler.lock().unwrap().enqueue(job);
+                        monitor
+                            .send(Event::RetryJob(QueueJobInfo::new(
+                                job.platform,
+                                quanta::Instant::now(),
+                                job_hash,
+                            )))
+                            .await?;
+                        scheduler.lock().await.enqueue(job);
                         notify_new_job
                             .send(QueueJobStatus::NewJobArrived)
                             .map_err(|e| {
@@ -326,7 +334,8 @@ where
                                     "Failed to send new job arrived signal in loop enqueue: {:?}",
                                     e
                                 )
-                            })?;
+                            })
+                            .await?;
                     }
                 }
                 QueueJob::SendStopProgram => {
@@ -339,7 +348,8 @@ where
                                 "Failed to send stop program signal in loop enqueue: {:?}",
                                 e
                             )
-                        })?;
+                        })
+                        .await?;
                 }
                 QueueJob::StopProgram => {
                     notify_new_job
@@ -349,7 +359,8 @@ where
                                 "Failed to send stop program signal in loop enqueue: {:?}",
                                 e
                             )
-                        })?;
+                        })
+                        .await?;
                     break;
                 }
             }
@@ -357,7 +368,7 @@ where
         Ok(())
     }
 
-    fn loop_dequeue(
+    async fn loop_dequeue(
         monitor: Sender<Event<P>>,
         request_job: Receiver<QueueJobStatus>,
         dequeue_job: HashMap<P, Sender<WorkerAction<P>>>,
@@ -367,64 +378,128 @@ where
         worker_config: WorkerConfig,
     ) -> Result<()> {
         debug!("Starting dequeue loop");
-        const TARGET_CIRCULATION: i32 = 10;
         // Negative circulation means that we are waiting for jobs to arrive.
         // Zero circulation means that we are in equilibrium and all workers are busy.
         // Positive circulation means that we are waiting for workers to complete jobs in the channel.
         let mut current_circulation = -(worker_config.target_circulation as i32);
-        let balance = |circulation: &mut i32| -> Result<()> {
-            // let mut lock = scheduler.lock().unwrap();
-            monitor.send(Event::BalanceCirculation(DequeueInfo::new(
-                *circulation,
-                scheduler.lock().unwrap().size(),
-                http_tx.len(),
-                browser_tx.len(),
-                quanta::Instant::now(),
-            )))?;
-            if *circulation < TARGET_CIRCULATION {
-                println!("should dequeue");
-                if let Some(job) = scheduler.lock().unwrap().dequeue() {
-                    println!("Dequeued job");
-                    let sender = dequeue_job.get(&job.platform).unwrap();
-                    sender.send(WorkerAction::Job(job)).map_err(|e| {
-                        anyhow!("Failed to send job to worker in dequeue loop: {:?}", e)
-                    })?;
-                    *circulation += 1;
-                    println!("Circulation: {}", *circulation);
-                }
-            }
-            Ok(())
-        };
+        // let balance = |circulation: &mut i32| -> Result<()> {
+        //     async {
+        //         // let mut lock = scheduler.lock().unwrap();
+        //         monitor
+        //             .send(Event::BalanceCirculation(DequeueInfo::new(
+        //                 *circulation,
+        //                 scheduler.lock().unwrap().size(),
+        //                 http_tx.len(),
+        //                 browser_tx.len(),
+        //                 quanta::Instant::now(),
+        //             )))
+        //             .await?;
+        //         if *circulation < TARGET_CIRCULATION {
+        //             println!("should dequeue");
+        //             if let Some(job) = scheduler.lock().unwrap().dequeue() {
+        //                 println!("Dequeued job");
+        //                 let sender = dequeue_job.get(&job.platform).unwrap();
+        //                 sender
+        //                     .send(WorkerAction::Job(job))
+        //                     .map_err(|e| {
+        //                         anyhow!("Failed to send job to worker in dequeue loop: {:?}", e)
+        //                     })
+        //                     .await?;
+        //                 *circulation += 1;
+        //                 println!("Circulation: {}", *circulation);
+        //             }
+        //         }
+        //         Ok(())
+        //     }
+        // };
         loop {
-            let status = request_job.recv()?;
+            let status = request_job.recv().await?;
             println!("Status: {:?}", status);
             match status {
                 QueueJobStatus::NewJobArrived => {
-                    balance(&mut current_circulation)?;
+                    Self::balance_circulation(
+                        worker_config.target_circulation as i32,
+                        &mut current_circulation,
+                        &scheduler,
+                        &http_tx,
+                        &browser_tx,
+                        &monitor,
+                        &dequeue_job,
+                    )
+                    .await?;
                 }
                 QueueJobStatus::WorkerCompleted {
                     worker_id: _worker_id,
                 } => {
                     current_circulation -= 1;
-                    balance(&mut current_circulation)?;
+                    Self::balance_circulation(
+                        worker_config.target_circulation as i32,
+                        &mut current_circulation,
+                        &scheduler,
+                        &http_tx,
+                        &browser_tx,
+                        &monitor,
+                        &dequeue_job,
+                    )
+                    .await?;
                 }
                 QueueJobStatus::SendStopProgram => {
                     info!("Sending stop signal to http workers");
                     for _http_platform in 0..worker_config.http_workers {
-                        http_tx.send(WorkerAction::StopProgram).map_err(|e| {
-                            anyhow!("Failed to send stop program to http workers: {:?}", e)
-                        })?;
+                        http_tx
+                            .send(WorkerAction::StopProgram)
+                            .map_err(|e| {
+                                anyhow!("Failed to send stop program to http workers: {:?}", e)
+                            })
+                            .await?;
                     }
                     info!("Sending stop signal to browser workers");
                     for _browser_platform in 0..worker_config.browser_workers {
-                        browser_tx.send(WorkerAction::StopProgram).map_err(|e| {
-                            anyhow!("Failed to send stop program to browser workers: {:?}", e)
-                        })?;
+                        browser_tx
+                            .send(WorkerAction::StopProgram)
+                            .map_err(|e| {
+                                anyhow!("Failed to send stop program to browser workers: {:?}", e)
+                            })
+                            .await?;
                     }
                 }
                 QueueJobStatus::StopProgram => {
                     break;
                 }
+            }
+        }
+        Ok(())
+    }
+
+    async fn balance_circulation(
+        target_circulation: i32,
+        circulation: &mut i32,
+        scheduler: &Arc<Mutex<S>>,
+        http_tx: &Sender<WorkerAction<P>>,
+        browser_tx: &Sender<WorkerAction<P>>,
+        monitor: &Sender<Event<P>>,
+        dequeue_job: &HashMap<P, Sender<WorkerAction<P>>>,
+    ) -> Result<()> {
+        monitor
+            .send(Event::BalanceCirculation(DequeueInfo::new(
+                *circulation,
+                scheduler.lock().await.size(),
+                http_tx.len(),
+                browser_tx.len(),
+                quanta::Instant::now(),
+            )))
+            .await?;
+        if *circulation < target_circulation {
+            println!("should dequeue");
+            if let Some(job) = scheduler.lock().await.dequeue() {
+                println!("Dequeued job");
+                let sender = dequeue_job.get(&job.platform).unwrap();
+                sender
+                    .send(WorkerAction::Job(job))
+                    .map_err(|e| anyhow!("Failed to send job to worker in dequeue loop: {:?}", e))
+                    .await?;
+                *circulation += 1;
+                println!("Circulation: {}", *circulation);
             }
         }
         Ok(())

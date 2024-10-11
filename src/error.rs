@@ -13,10 +13,23 @@ pub enum Error {
     TokioNativeTlsError(tokio_native_tls::native_tls::Error),
     AnyhowError(anyhow::Error),
     RequestError(reqwest::Error),
+    AsyncChannelError(String),
     Other(Box<dyn std::error::Error>),
 }
 
 unsafe impl Send for Error {}
+
+impl From<async_channel::RecvError> for Error {
+    fn from(e: async_channel::RecvError) -> Self {
+        Error::AsyncChannelError(e.to_string())
+    }
+}
+
+impl<T> From<async_channel::SendError<T>> for Error {
+    fn from(e: async_channel::SendError<T>) -> Self {
+        Error::AsyncChannelError(e.to_string())
+    }
+}
 
 impl From<reqwest::Error> for Error {
     fn from(e: reqwest::Error) -> Self {

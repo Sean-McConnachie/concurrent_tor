@@ -88,12 +88,13 @@ mod cron {
     use crate::browser::IpBrowserRequest;
     use crate::http::IpHttpRequest;
     use concurrent_tor::execution::scheduler::NotRequested;
+    use concurrent_tor::exports::AsyncChannelSender;
     use concurrent_tor::{
         execution::{
             cron::{CronPlatform, CronPlatformBuilder},
             scheduler::{Job, QueueJob},
         },
-        exports::{async_trait, CrossbeamSender},
+        exports::async_trait,
         Result,
     };
     use log::info;
@@ -103,7 +104,7 @@ mod cron {
 
     pub struct Cron {
         sleep_ms: u64,
-        queue_job: CrossbeamSender<QueueJob<Platform>>,
+        queue_job: AsyncChannelSender<QueueJob<Platform>>,
         stop_flag: Arc<AtomicBool>,
     }
 
@@ -134,7 +135,7 @@ mod cron {
 
                 let job = QueueJob::New(self.build_http_job());
                 println!("HttpCron job: {:?}", job);
-                self.queue_job.send(job).expect("Failed to send job");
+                self.queue_job.send(job).await.expect("Failed to send job");
                 info!("IpCron job sent");
 
                 // sleep(Duration::from_millis(self.sleep_ms)).await;
@@ -152,7 +153,7 @@ mod cron {
 
     pub struct MyCronBuilder {
         sleep_ms: u64,
-        queue_job: Option<CrossbeamSender<QueueJob<Platform>>>,
+        queue_job: Option<AsyncChannelSender<QueueJob<Platform>>>,
         stop_flag: Option<Arc<AtomicBool>>,
     }
 
@@ -167,7 +168,7 @@ mod cron {
     }
 
     impl CronPlatformBuilder<Platform> for MyCronBuilder {
-        fn set_queue_job(&mut self, queue_job: CrossbeamSender<QueueJob<Platform>>) {
+        fn set_queue_job(&mut self, queue_job: AsyncChannelSender<QueueJob<Platform>>) {
             self.queue_job = Some(queue_job);
         }
 
@@ -373,9 +374,10 @@ mod browser {
 mod monitor {
     use crate::server::ServerEvent;
     use crate::Platform;
+    use concurrent_tor::exports::AsyncChannelReceiver;
     use concurrent_tor::{
         execution::monitor::{Event, Monitor},
-        exports::{async_trait, CrossbeamReceiver},
+        exports::async_trait,
     };
     use crossbeam::channel::Receiver;
 
@@ -397,10 +399,11 @@ mod monitor {
             }
         }
 
-        fn start_ct_recv(event_rx: CrossbeamReceiver<Event<Platform>>) {
+        async fn start_ct_recv(event_rx: AsyncChannelReceiver<Event<Platform>>) {
             loop {
                 let ct_event = event_rx
                     .recv()
+                    .await
                     .expect("Failed to receive event from the scheduler");
                 if let Event::StopMonitor = ct_event {
                     break;
@@ -414,13 +417,12 @@ mod monitor {
     impl Monitor<Platform> for MyMonitor {
         async fn start(
             self,
-            event_rx: CrossbeamReceiver<Event<Platform>>,
+            event_rx: AsyncChannelReceiver<Event<Platform>>,
         ) -> concurrent_tor::Result<()> {
             let server_handle = tokio::task::spawn_blocking(move || {
                 MyMonitor::start_server_recv(self.server_event.clone())
             });
-            let ct_handle =
-                tokio::task::spawn_blocking(move || MyMonitor::start_ct_recv(event_rx.clone()));
+            let ct_handle = tokio::task::spawn(MyMonitor::start_ct_recv(event_rx.clone()));
             server_handle.await?;
             ct_handle.await?;
             Ok(())
