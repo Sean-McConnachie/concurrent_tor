@@ -129,7 +129,8 @@ where
 
         // Build Browser workers
         const STARTING_PORT: u16 = 9050;
-        let browser_workers: Vec<BrowserWorker<P, C, M>> = (0..worker_config.browser_workers)
+        let browser_workers: Vec<BrowserWorker<P, C, M>> = (worker_config.http_workers
+            ..worker_config.http_workers + worker_config.browser_workers)
             .map(|worker_id| {
                 let platforms = browser_platforms
                     .iter()

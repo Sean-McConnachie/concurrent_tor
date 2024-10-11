@@ -16,7 +16,7 @@ pub struct HttpPlatformConfig {
     /// Maximum number of requests per IP
     pub max_requests: u32,
     /// Rate limiting in seconds
-    pub timeout: u32,
+    pub timeout_ms: u32,
 }
 
 /// Configuration for the browser platform
@@ -25,7 +25,7 @@ pub struct BrowserPlatformConfig {
     /// Maximum number of requests per IP
     pub max_requests: u32,
     /// Rate limiting in seconds
-    pub timeout: u32,
+    pub timeout_ms: u32,
 }
 
 #[derive(Deserialize, Debug)]

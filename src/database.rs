@@ -66,11 +66,12 @@ where
     pub async fn insert_new(
         pool: &mut DB,
         num_attempts: i32,
-        hash: &str,
+        hash: u128,
         platform: P,
         request_json: &str,
     ) -> Result<()> {
         assert_eq!(num_attempts, 0);
+        let hash = hash.to_string();
         let platform_int = platform.to_repr() as i32;
         sqlx::query(
             "INSERT INTO job_cache (status, platform, hash, num_attempts, request) VALUES ($1, $2, $3, $4, $5)"
@@ -87,10 +88,11 @@ where
 
     pub async fn update_status_by_hash(
         pool: &mut DB,
-        hash: &str,
+        hash: u128,
         status: JobStatusDb,
         num_attempts: i32,
     ) -> Result<()> {
+        let hash = hash.to_string();
         sqlx::query("UPDATE job_cache SET status = $1, num_attempts = $2 WHERE hash = $3")
             .bind(status)
             .bind(num_attempts)

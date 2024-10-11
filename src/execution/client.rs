@@ -38,6 +38,12 @@ pub trait MainClient<C: Client>: Send + Sync + Clone {
     fn isolated_client(&self) -> C;
 }
 
+#[derive(Debug)]
+pub enum WorkerType {
+    Http,
+    Browser,
+}
+
 pub struct CTorClient {
     client: TorClient<PreferredRuntime>,
 }

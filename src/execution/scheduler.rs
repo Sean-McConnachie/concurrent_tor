@@ -1,3 +1,4 @@
+use crate::execution::monitor::{DequeueInfo, QueueJobInfo};
 use crate::{
     config::WorkerConfig,
     database::{JobCache, JobStatusDb, DB},
@@ -28,7 +29,7 @@ pub type FromJsonFn = fn(&str) -> Result<Box<dyn WorkerRequest>>;
 
 pub trait WorkerRequest: Send + Debug {
     fn as_any(&self) -> &dyn std::any::Any;
-    fn hash(&self) -> Result<String>;
+    fn hash(&self) -> Result<u128>;
     fn as_json(&self) -> String;
 }
 
@@ -125,6 +126,7 @@ pub trait Scheduler<P: PlatformT>: Send + 'static {
         }
     }
     fn dequeue(&mut self) -> Option<Job<NotRequested, P>>;
+    fn size(&self) -> usize;
 }
 
 #[derive(Debug)]
@@ -245,15 +247,21 @@ where
             let job = queue_job.recv()?;
             match job {
                 QueueJob::New(job) => {
+                    let job_hash = job.request.hash()?;
                     JobCache::insert_new(
                         &mut db,
                         job.num_attempts as i32,
-                        &job.request.hash()?,
+                        job_hash,
                         job.platform.clone(),
                         &job.request.as_json(),
                     )
                     .await?;
                     if !shutting_down {
+                        monitor.send(Event::NewJob(QueueJobInfo::new(
+                            job.platform,
+                            quanta::Instant::now(),
+                            job_hash,
+                        )))?;
                         scheduler.lock().unwrap().enqueue(job);
                         notify_new_job
                             .send(QueueJobStatus::NewJobArrived)
@@ -266,40 +274,60 @@ where
                     }
                 }
                 QueueJob::Completed(job) => {
+                    let job_hash = job.request.hash()?;
                     JobCache::<P>::update_status_by_hash(
                         &mut db,
-                        &job.request.hash()?,
+                        job_hash,
                         JobStatusDb::Completed,
                         job.num_attempts as i32,
                     )
                     .await?;
+                    monitor.send(Event::CompletedJob(QueueJobInfo::new(
+                        job.platform,
+                        quanta::Instant::now(),
+                        job_hash,
+                    )))?;
                 }
                 QueueJob::Failed(job) => {
+                    let job_hash = job.request.hash()?;
                     JobCache::<P>::update_status_by_hash(
                         &mut db,
-                        &job.request.hash()?,
+                        job_hash,
                         JobStatusDb::Failed,
                         job.num_attempts as i32,
                     )
                     .await?;
+                    monitor.send(Event::FailedJob(QueueJobInfo::new(
+                        job.platform,
+                        quanta::Instant::now(),
+                        job_hash,
+                    )))?;
                 }
                 QueueJob::Retry(job) => {
+                    let job_hash = job.request.hash()?;
                     JobCache::<P>::update_status_by_hash(
                         &mut db,
-                        &job.request.hash()?,
+                        job.request.hash()?,
                         JobStatusDb::Active,
                         job.num_attempts as i32,
                     )
                     .await?;
-                    scheduler.lock().unwrap().enqueue(job);
-                    notify_new_job
-                        .send(QueueJobStatus::NewJobArrived)
-                        .map_err(|e| {
-                            anyhow!(
-                                "Failed to send new job arrived signal in loop enqueue: {:?}",
-                                e
-                            )
-                        })?;
+                    if !shutting_down {
+                        monitor.send(Event::RetryJob(QueueJobInfo::new(
+                            job.platform,
+                            quanta::Instant::now(),
+                            job_hash,
+                        )))?;
+                        scheduler.lock().unwrap().enqueue(job);
+                        notify_new_job
+                            .send(QueueJobStatus::NewJobArrived)
+                            .map_err(|e| {
+                                anyhow!(
+                                    "Failed to send new job arrived signal in loop enqueue: {:?}",
+                                    e
+                                )
+                            })?;
+                    }
                 }
                 QueueJob::SendStopProgram => {
                     info!("Sending stop signal to dequeue loop");
@@ -345,8 +373,16 @@ where
         // Positive circulation means that we are waiting for workers to complete jobs in the channel.
         let mut current_circulation = -(worker_config.target_circulation as i32);
         let balance = |circulation: &mut i32| -> Result<()> {
+            let mut lock = scheduler.lock().unwrap();
+            monitor.send(Event::BalanceCirculation(DequeueInfo::new(
+                *circulation,
+                lock.size(),
+                http_tx.len(),
+                browser_tx.len(),
+                quanta::Instant::now(),
+            )))?;
             if *circulation < TARGET_CIRCULATION {
-                if let Some(job) = scheduler.lock().unwrap().dequeue() {
+                if let Some(job) = lock.dequeue() {
                     let sender = dequeue_job.get(&job.platform).unwrap();
                     sender.send(WorkerAction::Job(job)).map_err(|e| {
                         anyhow!("Failed to send job to worker in dequeue loop: {:?}", e)
@@ -414,8 +450,10 @@ where
     fn enqueue_many(&mut self, jobs: Vec<Job<NotRequested, P>>) {
         self.queue.extend(jobs);
     }
-
     fn dequeue(&mut self) -> Option<Job<NotRequested, P>> {
         self.queue.pop()
+    }
+    fn size(&self) -> usize {
+        self.queue.len()
     }
 }

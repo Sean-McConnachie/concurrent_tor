@@ -168,8 +168,8 @@ mod http {
             self
         }
 
-        fn hash(&self) -> Result<String> {
-            Ok(murmur3_x64_128(&mut Cursor::new(&self.url), 0)?.to_string())
+        fn hash(&self) -> Result<u128> {
+            Ok(murmur3_x64_128(&mut Cursor::new(&self.url), 0)?)
         }
 
         fn as_json(&self) -> String {
@@ -252,8 +252,8 @@ mod browser {
             self
         }
 
-        fn hash(&self) -> Result<String> {
-            Ok(murmur3_x64_128(&mut Cursor::new(&self.url), 0)?.to_string())
+        fn hash(&self) -> Result<u128> {
+            Ok(murmur3_x64_128(&mut Cursor::new(&self.url), 0)?)
         }
 
         fn as_json(&self) -> String {
@@ -364,7 +364,7 @@ async fn main() -> Result<()> {
 
     let stop = rt.graceful_stop();
     tokio::task::spawn(async move {
-        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
         stop().expect("Failed to stop runtime");
     });
 
