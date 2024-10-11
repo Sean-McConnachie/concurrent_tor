@@ -43,21 +43,9 @@ impl From<anyhow::Error> for Error {
     }
 }
 
-impl From<crossbeam::channel::RecvError> for Error {
-    fn from(e: crossbeam::channel::RecvError) -> Self {
-        Error::ChannelError(e.to_string())
-    }
-}
-
 impl From<sqlx::Error> for Error {
     fn from(e: sqlx::Error) -> Self {
         Error::SqlxError(e)
-    }
-}
-
-impl<T> From<crossbeam::channel::SendError<T>> for Error {
-    fn from(e: crossbeam::channel::SendError<T>) -> Self {
-        Error::ChannelError(e.to_string())
     }
 }
 

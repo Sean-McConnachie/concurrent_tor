@@ -19,7 +19,7 @@ use hyper::StatusCode;
 use log::{debug, info};
 use std::collections::HashMap;
 
-pub trait HttpPlatformBuilder<P: PlatformT, C: Client> {
+pub trait HttpPlatformBuilder<P: PlatformT, C: Client>: Send {
     fn platform(&self) -> P;
     fn build(&self) -> Box<dyn HttpPlatform<P, C>>;
 }

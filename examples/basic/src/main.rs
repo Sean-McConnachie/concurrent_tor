@@ -1,3 +1,4 @@
+use crate::server::ServerEvent;
 use concurrent_tor::{
     config::{BrowserPlatformConfig, HttpPlatformConfig, ScraperConfig, WorkerConfig},
     execution::{
@@ -101,6 +102,7 @@ mod cron {
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
     use std::time::Duration;
+    use tokio::time::sleep;
 
     pub struct Cron {
         sleep_ms: u64,
@@ -127,25 +129,23 @@ mod cron {
     #[async_trait]
     impl CronPlatform<Platform> for Cron {
         async fn start(self: Box<Self>) -> Result<()> {
-            // let h = tokio::task::spawn_blocking(move || {
             loop {
                 if self.stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
                     break;
                 }
 
                 let job = QueueJob::New(self.build_http_job());
-                println!("HttpCron job: {:?}", job);
+                // println!("HttpCron job: {:?}", job);
                 self.queue_job.send(job).await.expect("Failed to send job");
                 info!("IpCron job sent");
 
-                // sleep(Duration::from_millis(self.sleep_ms)).await;
+                sleep(Duration::from_millis(self.sleep_ms)).await;
 
-                // let job = QueueJob::New(self.build_browser_job());
-                // self.queue_job.send(job).expect("Failed to send job");
-                // info!("IpCron job sent");
+                let job = QueueJob::New(self.build_browser_job());
+                self.queue_job.send(job).await.expect("Failed to send job");
+                info!("IpCron job sent");
 
-                tokio::time::sleep(Duration::from_millis(self.sleep_ms)).await;
-                // std::thread::sleep(Duration::from_millis(self.sleep_ms));
+                sleep(Duration::from_millis(self.sleep_ms)).await;
             }
             Ok(())
         }
@@ -395,6 +395,9 @@ mod monitor {
                 let server_event = server_event
                     .recv()
                     .expect("Failed to receive event from the server");
+                if let ServerEvent::StopServer = server_event {
+                    break;
+                }
                 println!("Server event: {:?}", server_event);
             }
         }
@@ -419,11 +422,11 @@ mod monitor {
             self,
             event_rx: AsyncChannelReceiver<Event<Platform>>,
         ) -> concurrent_tor::Result<()> {
-            let server_handle = tokio::task::spawn_blocking(move || {
+            let _server_handle = tokio::task::spawn_blocking(move || {
                 MyMonitor::start_server_recv(self.server_event.clone())
             });
             let ct_handle = tokio::task::spawn(MyMonitor::start_ct_recv(event_rx.clone()));
-            server_handle.await?;
+            // server_handle.await?;
             ct_handle.await?;
             Ok(())
         }
@@ -441,6 +444,7 @@ mod server {
     use serde::{Deserialize, Serialize};
     use tokio::task::JoinHandle;
 
+    #[allow(dead_code)]
     #[derive(Debug)]
     pub struct JobInfo {
         pub hash: u128,
@@ -463,6 +467,8 @@ mod server {
         GetSuccess(JobInfo),
         InfoFailure(JobInfo),
         GetFailure(JobInfo),
+
+        StopServer,
     }
 
     #[derive(Deserialize, Serialize, Debug)]
@@ -530,25 +536,26 @@ mod server {
         ServerHandle,
         JoinHandle<std::io::Result<()>>,
         Receiver<ServerEvent>,
+        Sender<ServerEvent>,
     )> {
         let (event_tx, event_rx) = crossbeam::channel::unbounded::<ServerEvent>();
+        let event_tx_clone = event_tx.clone();
         let server = HttpServer::new(move || {
             App::new()
                 .service(get_job)
                 .service(post_job)
-                .app_data(web::Data::new(event_tx.clone()))
+                .app_data(web::Data::new(event_tx_clone.clone()))
         })
         .bind(addr)?
         .workers(workers)
         .run();
         let handle = server.handle();
         let join = tokio::task::spawn(server);
-        Ok((handle, join, event_rx))
+        Ok((handle, join, event_rx, event_tx))
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+async fn my_main() -> Result<()> {
     dotenv::dotenv().ok();
     tracing_subscriber::fmt::init();
     info!("Starting up");
@@ -558,7 +565,7 @@ async fn main() -> Result<()> {
         std::fs::remove_file(&db_path)?;
     }
 
-    let (server_handle, server_join, server_events) =
+    let (server_handle, server_join, server_events_rx, server_events_tx) =
         server::start_server(SERVER_ADDR, SERVER_WORKERS).await?;
 
     let send_req_timeout_ms = 500;
@@ -566,7 +573,7 @@ async fn main() -> Result<()> {
         workers: WorkerConfig {
             target_circulation: 10,
             http_workers: 1,
-            browser_workers: 0,
+            browser_workers: 1,
         },
         http_platforms: hashmap!(
             Platform::IpHttp => HttpPlatformConfig {
@@ -581,9 +588,9 @@ async fn main() -> Result<()> {
             }
         ),
     };
-    let rt = CTRuntime::run(
+    let ct = CTRuntime::run(
         ct_config.workers,
-        monitor::MyMonitor::new(server_events),
+        monitor::MyMonitor::new(server_events_rx),
         SimpleScheduler::new(),
         build_main_client().await?,
         vec![cron_box(cron::MyCronBuilder::new(send_req_timeout_ms))],
@@ -594,14 +601,21 @@ async fn main() -> Result<()> {
     )
     .await?;
 
-    let stop = rt.graceful_stop();
+    let stop = ct.graceful_stop();
     tokio::task::spawn(async move {
-        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-        stop().expect("Failed to stop runtime");
+        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+        stop().await.expect("Failed to stop runtime");
     });
 
-    rt.join().await?;
+    ct.join().await?;
+    server_events_tx.send(ServerEvent::StopServer).unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     server_handle.stop(true).await;
     server_join.await??;
     Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    my_main().await
 }

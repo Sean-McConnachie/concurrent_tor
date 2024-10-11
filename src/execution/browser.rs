@@ -18,7 +18,7 @@ use log::{debug, info};
 use std::{collections::HashMap, sync::Arc};
 use tokio::task::JoinHandle;
 
-pub trait BrowserPlatformBuilder<P: PlatformT> {
+pub trait BrowserPlatformBuilder<P: PlatformT>: Send {
     fn platform(&self) -> P;
     fn build(&self) -> Box<dyn BrowserPlatform<P>>;
 }

@@ -930,7 +930,6 @@ dependencies = [
  "async-channel",
  "async-trait",
  "chrono",
- "crossbeam",
  "dotenv",
  "failure",
  "futures-util",

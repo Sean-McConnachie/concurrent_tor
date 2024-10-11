@@ -15,6 +15,8 @@ use anyhow::anyhow;
 use async_channel::{unbounded, Sender};
 use futures_util::TryFutureExt;
 use log::info;
+use std::future::Future;
+use std::pin::Pin;
 use std::{
     collections::HashMap,
     sync::{atomic::AtomicBool, Arc},
@@ -214,26 +216,33 @@ where
         Ok(())
     }
 
-    pub fn graceful_stop(&self) -> impl FnOnce() -> Result<()> {
+    pub fn graceful_stop(
+        &self,
+    ) -> impl FnOnce() -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
         let stop_queue_worker = self.stop_queue_worker.clone();
         let stop_cron_flag = self.stop_cron_flag.clone();
+
+        // Return a closure that, when called, will return a boxed async future
         move || {
-            if stop_cron_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                info!("Cron flag is already set to stop");
-                return Ok(());
-            }
-            info!("Stopping program");
-            stop_cron_flag.store(true, std::sync::atomic::Ordering::Relaxed);
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(async {
+            let stop_queue_worker = stop_queue_worker.clone();
+            let stop_cron_flag = stop_cron_flag.clone();
+
+            // Create the async block
+            Box::pin(async move {
+                if stop_cron_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    info!("Cron flag is already set to stop");
+                    return Ok(());
+                }
+                info!("Stopping program");
+                stop_cron_flag.store(true, std::sync::atomic::Ordering::Relaxed);
                 stop_queue_worker
                     .send(QueueJob::SendStopProgram)
                     .map_err(|e| {
                         anyhow!("Failed to send stop program to queue in runtime: {:?}", e)
                     })
-                    .await
-            })?;
-            Ok(())
+                    .await?;
+                Ok(())
+            })
         }
     }
 }
