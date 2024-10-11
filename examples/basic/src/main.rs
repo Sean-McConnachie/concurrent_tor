@@ -327,9 +327,9 @@ async fn main() -> Result<()> {
     )
     .await?;
 
-    let stop = rt.stop();
+    let stop = rt.graceful_stop();
     tokio::task::spawn(async move {
-        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
         stop().expect("Failed to stop runtime");
     });
 

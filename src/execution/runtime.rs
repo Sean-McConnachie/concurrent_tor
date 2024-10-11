@@ -180,8 +180,6 @@ where
 
     pub async fn join(self) -> Result<()> {
         let n_worker_handles = self.join_handles.len();
-        self.stop_cron_flag
-            .store(true, std::sync::atomic::Ordering::Relaxed);
         for (i, handle) in self.join_handles.into_iter().enumerate() {
             handle.await??;
             info!("Joined worker handle {}/{n_worker_handles}", i + 1);
@@ -197,10 +195,16 @@ where
         Ok(())
     }
 
-    pub fn stop(&self) -> impl FnOnce() -> Result<()> {
+    pub fn graceful_stop(&self) -> impl FnOnce() -> Result<()> {
         let stop_queue_worker = self.stop_queue_worker.clone();
+        let stop_cron_flag = self.stop_cron_flag.clone();
         move || {
+            if stop_cron_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                info!("Cron flag is already set to stop");
+                return Ok(());
+            }
             info!("Stopping program");
+            stop_cron_flag.store(true, std::sync::atomic::Ordering::Relaxed);
             stop_queue_worker
                 .send(QueueJob::SendStopProgram)
                 .map_err(|e| anyhow!("Failed to send stop program to queue in runtime: {:?}", e))?;
