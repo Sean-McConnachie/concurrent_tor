@@ -1,36 +1,27 @@
 use crate::{
     config::HttpPlatformConfig,
-    execution::scheduler::{Job, MainTorClient, NotRequested, QueueJob, QueueJobStatus, Requested},
+    execution::{
+        client::{Client, MainClient},
+        scheduler::{Job, NotRequested, PlatformT, QueueJob, QueueJobStatus, Requested},
+    },
     Result,
 };
-use arti_client::TorClient;
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 use crossbeam::channel::{Receiver, Sender};
-use http_body_util::{BodyExt, Empty};
-use hyper::{body::Bytes, http::uri::Scheme, Method, Request, StatusCode, Uri};
-use hyper_util::rt::TokioIo;
+use hyper::StatusCode;
 use log::debug;
 use std::collections::HashMap;
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_native_tls::native_tls::TlsConnector;
-use tor_rtcompat::PreferredRuntime;
 
-use super::scheduler::PlatformT;
-
-pub trait HttpPlatformBuilder<P: PlatformT> {
+pub trait HttpPlatformBuilder<P: PlatformT, C: Client> {
     fn platform(&self) -> P;
-    fn build(&self) -> Box<dyn HttpPlatform<P>>;
+    fn build(&self) -> Box<dyn HttpPlatform<P, C>>;
 }
 
 #[async_trait]
-pub trait HttpPlatform<P: PlatformT>: Send {
+pub trait HttpPlatform<P: PlatformT, C: Client>: Send {
     /// Function should not fail when passed back to the API. Therefore, it should handle all errors itself.
-    fn process_job(
-        &self,
-        job: Job<NotRequested, P>,
-        client: &TorClient<PreferredRuntime>,
-    ) -> Vec<QueueJob<P>>;
+    fn process_job(&self, job: Job<NotRequested, P>, client: &C) -> Vec<QueueJob<P>>;
 }
 
 #[derive(Debug)]
@@ -52,18 +43,19 @@ enum HttpPlatformBehaviourError {
     MaxRequests,
 }
 
-pub struct HttpPlatformData<P: PlatformT> {
-    platform_impl: Box<dyn HttpPlatform<P>>,
+pub struct HttpPlatformData<P: PlatformT, C: Client> {
+    platform_impl: Box<dyn HttpPlatform<P, C>>,
     config: HttpPlatformConfig,
     last_request: DateTime<Utc>,
     requests: u32,
 }
 
-impl<P> HttpPlatformData<P>
+impl<P, C> HttpPlatformData<P, C>
 where
     P: PlatformT,
+    C: Client,
 {
-    pub fn new(platform_impl: Box<dyn HttpPlatform<P>>, config: HttpPlatformConfig) -> Self {
+    pub fn new(platform_impl: Box<dyn HttpPlatform<P, C>>, config: HttpPlatformConfig) -> Self {
         HttpPlatformData {
             platform_impl,
             config,
@@ -95,7 +87,7 @@ where
     }
 }
 
-pub struct HttpWorker<P: PlatformT> {
+pub struct HttpWorker<P: PlatformT, C: Client, M: MainClient<C>> {
     worker_id: u32,
     /// Request job from a queue
     request_job: Sender<QueueJobStatus>,
@@ -106,16 +98,18 @@ pub struct HttpWorker<P: PlatformT> {
     /// Add a new, or existing job to the queue
     queue_job: Sender<QueueJob<P>>,
     /// Tor client to make requests
-    client: TorClient<PreferredRuntime>,
+    client: C,
     /// Here to query a new client when necessary
-    main_client: MainTorClient,
+    main_client: M,
     /// Platforms that store [HttpPlatform], the last request time, and the number of requests.
-    platforms: HashMap<P, HttpPlatformData<P>>,
+    platforms: HashMap<P, HttpPlatformData<P, C>>,
 }
 
-impl<P> HttpWorker<P>
+impl<P, C, M> HttpWorker<P, C, M>
 where
     P: PlatformT,
+    C: Client,
+    M: MainClient<C>,
 {
     pub fn new(
         worker_id: u32,
@@ -123,8 +117,8 @@ where
         recv_job: Receiver<Job<NotRequested, P>>,
         requeue_job: Sender<Job<NotRequested, P>>,
         queue_job: Sender<QueueJob<P>>,
-        main_client: MainTorClient,
-        platforms: HashMap<P, HttpPlatformData<P>>,
+        main_client: M,
+        platforms: HashMap<P, HttpPlatformData<P, C>>,
     ) -> Self {
         debug!("Creating http worker {}", worker_id);
         HttpWorker {
@@ -181,69 +175,5 @@ where
                 }
             }
         }
-    }
-
-    pub async fn make_request(
-        client: &TorClient<PreferredRuntime>,
-        uri: &Uri,
-        method: Method,
-        headers: Option<HashMap<String, String>>,
-    ) -> Result<HttpResponse> {
-        let host = uri.host().unwrap();
-        let https = uri.scheme() == Some(&Scheme::HTTPS);
-        let port = match uri.port_u16() {
-            Some(port) => port,
-            _ if https => 443,
-            _ => 80,
-        };
-
-        let stream = client.connect((host, port)).await?;
-        if https {
-            let cx = TlsConnector::builder().build()?;
-            let cx = tokio_native_tls::TlsConnector::from(cx);
-            let stream = cx.connect(host, stream).await?;
-            Self::query_request(host, headers, method, stream).await
-        } else {
-            Self::query_request(host, headers, method, stream).await
-        }
-    }
-
-    pub async fn query_request(
-        host: &str,
-        headers: Option<HashMap<String, String>>,
-        method: Method,
-        stream: impl AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    ) -> Result<HttpResponse> {
-        let (mut request_sender, connection) =
-            hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
-
-        tokio::spawn(async move { connection.await });
-
-        let mut request = Request::builder().header("Host", host).method(method);
-        if let Some(headers) = headers {
-            for (key, value) in headers.iter() {
-                request = request.header(key, value);
-            }
-        }
-
-        let mut resp = request_sender
-            .send_request(request.body(Empty::<Bytes>::new()).unwrap())
-            .await?;
-
-        let mut full_body = Vec::new();
-        while let Some(frame) = resp.body_mut().frame().await {
-            let bytes = frame?.into_data().unwrap();
-            full_body.extend_from_slice(&bytes);
-        }
-        let body = String::from_utf8(full_body).unwrap();
-        Ok(HttpResponse {
-            status: resp.status(),
-            headers: resp
-                .headers()
-                .iter()
-                .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap().to_string()))
-                .collect(),
-            body,
-        })
     }
 }

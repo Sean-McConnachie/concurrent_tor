@@ -12,10 +12,17 @@ pub enum Error {
     ArtiClientError(arti_client::Error),
     TokioNativeTlsError(tokio_native_tls::native_tls::Error),
     AnyhowError(anyhow::Error),
+    RequestError(reqwest::Error),
     Other(Box<dyn std::error::Error>),
 }
 
 unsafe impl Send for Error {}
+
+impl From<reqwest::Error> for Error {
+    fn from(e: reqwest::Error) -> Self {
+        Error::RequestError(e)
+    }
+}
 
 impl From<anyhow::Error> for Error {
     fn from(e: anyhow::Error) -> Self {

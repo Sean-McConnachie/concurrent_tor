@@ -1,9 +1,10 @@
-use basic::platforms::{ip_browser, ip_cron, ip_http};
+use basic::{
+    build_main_client,
+    platforms::{ip_browser, ip_cron, ip_http},
+};
 use concurrent_tor::{
     config::ScraperConfig,
-    execution::runtime::run_scraper_runtime,
-    execution::scheduler::{MainTorClient, QueueScheduler},
-    exports::TorClientConfig,
+    execution::{runtime::run_scraper_runtime, scheduler::QueueScheduler},
     *,
 };
 use log::info;
@@ -18,7 +19,7 @@ async fn main() -> Result<()> {
     run_scraper_runtime(
         config.workers,
         QueueScheduler::new(),
-        MainTorClient::new(TorClientConfig::default()).await?,
+        build_main_client().await?,
         vec![cron_box(ip_cron::IpCron::new())],
         config.http_platforms,
         vec![http_box(ip_http::IpHttpBuilder::new())],

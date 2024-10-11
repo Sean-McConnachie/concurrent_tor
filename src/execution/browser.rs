@@ -1,17 +1,18 @@
 use crate::{
     config::BrowserPlatformConfig,
-    execution::scheduler::{Job, MainTorClient, NotRequested, PlatformT, QueueJob, QueueJobStatus},
+    execution::{
+        client::{Client, MainClient},
+        scheduler::{Job, NotRequested, PlatformT, QueueJob, QueueJobStatus},
+    },
     Result,
 };
-use arti::socks::run_socks_proxy;
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 use crossbeam::channel::{Receiver, Sender};
 use headless_chrome::{Browser, LaunchOptions, Tab};
-use log::{debug, error};
+use log::debug;
 use std::collections::HashMap;
 use tokio::task::JoinHandle;
-use tor_config::Listen;
 
 pub trait BrowserPlatformBuilder<P: PlatformT> {
     fn platform(&self) -> P;
@@ -73,7 +74,7 @@ where
     }
 }
 
-pub struct BrowserWorker<P: PlatformT> {
+pub struct BrowserWorker<P: PlatformT, C: Client, M: MainClient<C>> {
     worker_id: u32,
     /// Request job from a queue
     request_job: Sender<QueueJobStatus>,
@@ -84,7 +85,7 @@ pub struct BrowserWorker<P: PlatformT> {
     /// Add a new, or existing job to the queue
     queue_job: Sender<QueueJob<P>>,
     /// Here to query a new client when necessary
-    main_client: MainTorClient,
+    main_client: M,
     /// Platforms that store [BrowserPlatform], the last request time, and the number of requests.
     platforms: HashMap<P, BrowserPlatformData<P>>,
     /// Proxy handle
@@ -96,11 +97,14 @@ pub struct BrowserWorker<P: PlatformT> {
     headless: bool,
     /// Listener port
     port: u16,
+    _client: std::marker::PhantomData<C>,
 }
 
-impl<P> BrowserWorker<P>
+impl<P, C, M> BrowserWorker<P, C, M>
 where
     P: PlatformT,
+    C: Client,
+    M: MainClient<C>,
 {
     pub fn new(
         worker_id: u32,
@@ -108,16 +112,19 @@ where
         recv_job: Receiver<Job<NotRequested, P>>,
         requeue_job: Sender<Job<NotRequested, P>>,
         queue_job: Sender<QueueJob<P>>,
-        main_client: MainTorClient,
+        main_client: M,
         platforms: HashMap<P, BrowserPlatformData<P>>,
         headless: bool,
         port: u16,
     ) -> Result<Self> {
         debug!("Creating browser worker {}", worker_id);
         let socks_addr = Self::format_socks_proxy_addr(port);
-        let browser_opts = LaunchOptions::default_builder()
+        let mut browser_opts = LaunchOptions::default_builder();
+        if M::use_proxy() {
+            browser_opts.proxy_server(Some(&socks_addr));
+        }
+        let browser_opts = browser_opts
             .headless(headless)
-            .proxy_server(Some(&socks_addr))
             .build()
             .expect("Failed to find chrome executable");
 
@@ -133,6 +140,7 @@ where
             browser: Browser::new(browser_opts)?,
             headless,
             port,
+            _client: std::marker::PhantomData,
         })
     }
 
@@ -140,20 +148,16 @@ where
         format!("socks5://localhost:{}", port)
     }
 
-    fn start_proxy_handle(
-        worker_id: u32,
-        main_client: &MainTorClient,
-        port: u16,
-    ) -> JoinHandle<()> {
+    fn start_proxy_handle(worker_id: u32, main_client: &M, port: u16) -> JoinHandle<()> {
         debug!("Starting proxy for browser worker {}", worker_id);
-        let client = main_client.isolated_client();
-        let listen = Listen::new_localhost(port);
-        tokio::spawn(async {
-            match run_socks_proxy(client.runtime().clone(), client, listen).await {
-                Ok(_) => debug!("Proxy exited successfully"),
-                Err(e) => error!("Proxy exited with error: {:?}", e),
-            }
-        })
+        if M::use_proxy() {
+            let client = main_client.isolated_client();
+            client
+                .start_proxy(port)
+                .expect("Proxy implementation must return a join handle.")
+        } else {
+            tokio::spawn(async {})
+        }
     }
 
     fn renew_client(self) -> Result<Self> {

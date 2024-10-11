@@ -3,7 +3,6 @@ use crate::{
     database::{JobCache, JobStatusDb, DB},
     Result,
 };
-use arti_client::{TorClient, TorClientConfig};
 use crossbeam::channel::{Receiver, Sender};
 use log::debug;
 use serde::de::DeserializeOwned;
@@ -12,9 +11,7 @@ use std::fmt::Debug;
 use std::hash::Hash;
 use std::sync::{Arc, Mutex};
 use tokio::task::JoinHandle;
-use tor_rtcompat::PreferredRuntime;
 
-// #[derive(Serialize, Deserialize, Debug, Clone, Hash, Eq, PartialEq, sqlx::Type)]
 pub trait PlatformT:
     DeserializeOwned + Debug + Clone + Copy + Hash + Eq + PartialEq + Send + Sync + Unpin + 'static
 {
@@ -23,24 +20,8 @@ pub trait PlatformT:
     fn from_repr(repr: usize) -> Self;
 }
 
-#[derive(Clone)]
-pub struct MainTorClient {
-    client: Arc<Mutex<TorClient<PreferredRuntime>>>,
-}
-
-impl MainTorClient {
-    pub async fn new(config: TorClientConfig) -> Result<Self> {
-        Ok(MainTorClient {
-            client: Arc::new(Mutex::new(TorClient::create_bootstrapped(config).await?)),
-        })
-    }
-
-    pub fn isolated_client(&self) -> TorClient<PreferredRuntime> {
-        self.client.lock().unwrap().isolated_client()
-    }
-}
-
 pub type FromJsonFn = fn(&str) -> Result<Box<dyn WorkerRequest>>;
+
 pub trait WorkerRequest: Send + Debug {
     fn as_any(&self) -> &dyn std::any::Any;
     fn hash(&self) -> Result<String>;

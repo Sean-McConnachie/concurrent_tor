@@ -3,29 +3,33 @@ use crate::{
     database::connect_and_init_db,
     execution::{
         browser::{BrowserPlatformBuilder, BrowserPlatformData, BrowserWorker},
+        client::{Client, MainClient},
         cron::CronPlatform,
         http::{HttpPlatformBuilder, HttpPlatformData, HttpWorker},
         scheduler::{
-            Job, JobDistributor, MainTorClient, NotRequested, PlatformT, QueueJob, QueueJobStatus,
-            Scheduler,
+            Job, JobDistributor, NotRequested, PlatformT, QueueJob, QueueJobStatus, Scheduler,
         },
     },
     Result,
 };
-use arti_client::TorClientConfig;
 use crossbeam::channel::unbounded;
 use log::info;
 use std::collections::HashMap;
 
-pub async fn run_scraper_runtime<S: Scheduler<P>, P: PlatformT>(
+pub async fn run_scraper_runtime<
+    S: Scheduler<P>,
+    P: PlatformT,
+    C: Client + 'static,
+    M: MainClient<C> + 'static,
+>(
     worker_config: WorkerConfig,
     scheduler: S,
+    main_client: M,
 
     mut cron_platforms: Vec<Box<dyn CronPlatform<P>>>,
 
-    tor_client_config: TorClientConfig,
     http_platform_configs: HashMap<P, HttpPlatformConfig>,
-    http_platforms: Vec<Box<dyn HttpPlatformBuilder<P>>>,
+    http_platforms: Vec<Box<dyn HttpPlatformBuilder<P, C>>>,
 
     browser_platform_configs: HashMap<P, BrowserPlatformConfig>,
     browser_platforms: Vec<Box<dyn BrowserPlatformBuilder<P>>>,
@@ -64,7 +68,6 @@ pub async fn run_scraper_runtime<S: Scheduler<P>, P: PlatformT>(
     };
 
     // Build HTTP workers
-    let main_tor_client = MainTorClient::new(tor_client_config).await?;
     let http_workers = (0..worker_config.http_workers)
         .map(|worker_id| {
             let platforms = http_platforms
@@ -86,7 +89,7 @@ pub async fn run_scraper_runtime<S: Scheduler<P>, P: PlatformT>(
                 http_worker_rx.clone(),
                 http_worker_tx.clone(),
                 queue_job_tx.clone(),
-                main_tor_client.clone(),
+                main_client.clone(),
                 platforms,
             )
         })
@@ -94,7 +97,7 @@ pub async fn run_scraper_runtime<S: Scheduler<P>, P: PlatformT>(
 
     // Build Browser workers
     const STARTING_PORT: u16 = 9050;
-    let browser_workers: Vec<BrowserWorker<P>> = (0..worker_config.browser_workers)
+    let browser_workers: Vec<BrowserWorker<P, C, M>> = (0..worker_config.browser_workers)
         .map(|worker_id| {
             let platforms = browser_platforms
                 .iter()
@@ -116,7 +119,7 @@ pub async fn run_scraper_runtime<S: Scheduler<P>, P: PlatformT>(
                 browser_worker_rx.clone(),
                 browser_worker_tx.clone(),
                 queue_job_tx.clone(),
-                main_tor_client.clone(),
+                main_client.clone(),
                 platforms,
                 true, // TODO: Make this configurable
                 socks_port,
