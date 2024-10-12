@@ -30,3 +30,7 @@ where
 {
     Box::new(builder) as Box<dyn BrowserPlatformBuilder<P>>
 }
+
+pub fn quanta_zero() -> quanta::Instant {
+    unsafe { std::mem::zeroed() }
+}

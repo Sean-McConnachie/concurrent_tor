@@ -23,7 +23,7 @@ use hyper::{
     Method, Request, Uri,
 };
 use hyper_util::rt::TokioIo;
-use log::{debug, error};
+use log::{debug, error, info, warn};
 use reqwest::Url;
 use std::{
     collections::HashMap,
@@ -368,6 +368,22 @@ where
         let (current_job_hash, num_attempts, max_attempts) = job
             .inner_job_info()?
             .expect("Bad QueueJob sent to ConcurrentTor runtime.");
+
+        let job = if num_attempts == max_attempts {
+            if let QueueJob::Retry(job) = job {
+                warn!(
+                    "Job {} has reached max attempts in http worker {} without having explicitly \
+                    specified a failed status. Setting to failed and removing from circulation.",
+                    job_hash, worker_id
+                );
+                QueueJob::Failed(job)
+            } else {
+                job
+            }
+        } else {
+            job
+        };
+
         if current_job_hash == job_hash {
             // We found the original job
             if !original_job_completed {

@@ -11,7 +11,7 @@ use crate::{
             QueueJobStatus, WorkerAction,
         },
     },
-    Result,
+    quanta_zero, Result,
 };
 use async_channel::{Receiver, Sender};
 use async_trait::async_trait;
@@ -41,7 +41,7 @@ impl BrowserPlatformData {
     pub fn new(config: BrowserPlatformConfig) -> Self {
         BrowserPlatformData {
             config,
-            last_request: quanta::Instant::now(),
+            last_request: quanta_zero(),
             requests: 0,
         }
     }
@@ -66,6 +66,7 @@ impl PlatformHistory for BrowserPlatformData {
 
     fn reset(&mut self) {
         self.requests = 0;
+        self.last_request = quanta_zero();
     }
 }
 

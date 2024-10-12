@@ -11,12 +11,12 @@ use crate::{
             QueueJobStatus, Requested, WorkerAction,
         },
     },
-    Result,
+    quanta_zero, Result,
 };
 use async_channel::{Receiver, Sender};
 use async_trait::async_trait;
 use hyper::StatusCode;
-use log::{debug, info};
+use log::{debug, info, warn};
 use std::collections::HashMap;
 
 pub trait HttpPlatformBuilder<P: PlatformT, C: Client>: Send {
@@ -53,7 +53,7 @@ impl HttpPlatformData {
     pub fn new(config: HttpPlatformConfig) -> Self {
         HttpPlatformData {
             config,
-            last_request: quanta::Instant::now(),
+            last_request: quanta_zero(),
             requests: 0,
         }
     }
@@ -65,7 +65,7 @@ impl PlatformHistory for HttpPlatformData {
         if self.requests >= self.config.max_requests {
             return PlatformCanRequest::MaxRequests;
         }
-        if diff.as_micros() > (self.config.timeout_ms as u128) * 1000 {
+        if diff.as_millis() > self.config.timeout_ms as u128 {
             return PlatformCanRequest::Ok;
         }
         PlatformCanRequest::MustWait
@@ -78,6 +78,7 @@ impl PlatformHistory for HttpPlatformData {
 
     fn reset(&mut self) {
         self.requests = 0;
+        self.last_request = quanta_zero();
     }
 }
 

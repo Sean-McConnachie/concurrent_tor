@@ -8,7 +8,7 @@ use anyhow::anyhow;
 use async_channel::{Receiver, Sender};
 use dyn_clone::DynClone;
 use futures_util::TryFutureExt;
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use serde::de::DeserializeOwned;
 use std::{collections::HashMap, fmt::Debug, hash::Hash, sync::Arc};
 use tokio::{sync::Mutex, task::JoinHandle};
@@ -110,6 +110,21 @@ where
     }
 }
 
+impl<P> Job<Requested, P>
+where
+    P: PlatformT,
+{
+    pub(crate) fn to_not_requested(self) -> Job<NotRequested, P> {
+        Job {
+            platform: self.platform,
+            request: self.request,
+            num_attempts: self.num_attempts,
+            max_attempts: self.max_attempts,
+            _status: std::marker::PhantomData,
+        }
+    }
+}
+
 impl<P> From<&Job<NotRequested, P>> for Job<Requested, P>
 where
     P: PlatformT,
@@ -137,7 +152,7 @@ pub enum QueueJob<P: PlatformT> {
     Completed(Job<Requested, P>),
     /// Cancel the job and do not retry.
     Failed(Job<Requested, P>),
-    Retry(Job<NotRequested, P>),
+    Retry(Job<Requested, P>),
     SendStopProgram,
     StopProgram,
 }
@@ -413,7 +428,7 @@ where
                                     job.max_attempts,
                                 )))
                                 .await?;
-                            scheduler.lock().await.enqueue(job);
+                            scheduler.lock().await.enqueue(job.to_not_requested());
                             notify_new_job
                                 .send(QueueJobStatus::NewJobArrived)
                                 .map_err(|e| {
@@ -433,13 +448,14 @@ where
                         .send(QueueJobStatus::SendStopProgram)
                         .map_err(|e| {
                             anyhow!(
-                                "Failed to send stop program signal in loop enqueue: {:?}",
+                                "Failed to send preliminary stop program signal in loop enqueue: {:?}",
                                 e
                             )
                         })
                         .await?;
                 }
                 QueueJob::StopProgram => {
+                    info!("Stopping enqueue loop");
                     notify_new_job
                         .send(QueueJobStatus::StopProgram)
                         .map_err(|e| {
@@ -453,6 +469,7 @@ where
                 }
             }
         }
+        info!("Stopping enqueue loop");
         Ok(())
     }
 
@@ -470,35 +487,40 @@ where
         // Zero circulation means that we are in equilibrium and all workers are busy.
         // Positive circulation means that we are waiting for workers to complete jobs in the channel.
         let mut current_circulation = -(worker_config.target_circulation as i32);
+        let mut shutting_down = false;
         loop {
             let status = request_job.recv().await?;
             match status {
                 QueueJobStatus::NewJobArrived => {
-                    Self::balance_circulation(
-                        worker_config.target_circulation as i32,
-                        &mut current_circulation,
-                        &scheduler,
-                        &http_tx,
-                        &browser_tx,
-                        &monitor,
-                        &dequeue_job,
-                    )
-                    .await?;
+                    if !shutting_down {
+                        Self::balance_circulation(
+                            worker_config.target_circulation as i32,
+                            &mut current_circulation,
+                            &scheduler,
+                            &http_tx,
+                            &browser_tx,
+                            &monitor,
+                            &dequeue_job,
+                        )
+                        .await?;
+                    }
                 }
                 QueueJobStatus::WorkerCompleted {
                     worker_id: _worker_id,
                 } => {
                     current_circulation -= 1;
-                    Self::balance_circulation(
-                        worker_config.target_circulation as i32,
-                        &mut current_circulation,
-                        &scheduler,
-                        &http_tx,
-                        &browser_tx,
-                        &monitor,
-                        &dequeue_job,
-                    )
-                    .await?;
+                    if !shutting_down {
+                        Self::balance_circulation(
+                            worker_config.target_circulation as i32,
+                            &mut current_circulation,
+                            &scheduler,
+                            &http_tx,
+                            &browser_tx,
+                            &monitor,
+                            &dequeue_job,
+                        )
+                        .await?;
+                    }
                 }
                 QueueJobStatus::SendStopProgram => {
                     info!("Sending stop signal to http workers");
@@ -519,12 +541,14 @@ where
                             })
                             .await?;
                     }
+                    shutting_down = true;
                 }
                 QueueJobStatus::StopProgram => {
                     break;
                 }
             }
         }
+        info!("Stopping dequeue loop");
         Ok(())
     }
 

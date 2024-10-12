@@ -66,15 +66,15 @@ mod tor_client {
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Hash, Eq, PartialEq, StrumFromRepr)]
 pub enum Platform {
-    IpHttp,
-    IpBrowser,
+    MyHttp,
+    MyBrowser,
 }
 
 impl PlatformT for Platform {
     fn request_from_json(&self, json: &str) -> Result<Box<dyn WorkerRequest>> {
         match self {
-            Platform::IpHttp => http::MyHttpRequest::from_json(json),
-            Platform::IpBrowser => browser::MyBrowserRequest::from_json(json),
+            Platform::MyHttp => http::MyHttpRequest::from_json(json),
+            Platform::MyBrowser => browser::MyBrowserRequest::from_json(json),
         }
     }
 
@@ -136,14 +136,14 @@ mod cron {
             let req =
                 MyHttpRequest::new(format!("http://{}:{}/post", SERVER_ADDR.0, SERVER_ADDR.1));
             let hash = req.hash().expect("Unable to hash");
-            (hash, Job::init_from_box(Platform::IpHttp, req, 3))
+            (hash, Job::init_from_box(Platform::MyHttp, req, 3))
         }
 
         fn build_browser_job(&self) -> (JobHash, Job<NotRequested, Platform>) {
             let req =
                 MyBrowserRequest::new(format!("http://{}:{}/get/", SERVER_ADDR.0, SERVER_ADDR.1));
             let hash = req.hash().expect("Unable to hash");
-            (hash, Job::init(Platform::IpBrowser, Box::new(req), 3))
+            (hash, Job::init(Platform::MyBrowser, Box::new(req), 3))
         }
     }
 
@@ -332,7 +332,11 @@ mod http {
                 )))
                 .await
                 .expect("Failed to send event");
-            vec![QueueJob::Completed(completed)]
+            if resp.status.is_success() {
+                vec![QueueJob::Completed(completed)]
+            } else {
+                vec![QueueJob::Retry(completed)]
+            }
         }
     }
 
@@ -348,7 +352,7 @@ mod http {
 
     impl HttpPlatformBuilder<Platform, ClientBackend> for MyHttpBuilder {
         fn platform(&self) -> Platform {
-            Platform::IpHttp
+            Platform::MyHttp
         }
 
         fn build(&self) -> Box<dyn HttpPlatform<Platform, ClientBackend>> {
@@ -433,7 +437,8 @@ mod browser {
                 resp
             });
             let r = handle.await.unwrap();
-            if r.contains(SUCCESS_MESSAGE) {
+            let completed: Job<Requested, Platform> = job.into();
+            let q_job = if r.contains(SUCCESS_MESSAGE) {
                 self.events
                     .send(ImplementationEvent::MadeBrowserRequest((
                         quanta::Instant::now(),
@@ -442,6 +447,7 @@ mod browser {
                     )))
                     .await
                     .expect("Failed to send event");
+                QueueJob::Completed(completed)
             } else if r.contains(FAILURE_MESSAGE) {
                 self.events
                     .send(ImplementationEvent::MadeBrowserRequest((
@@ -451,11 +457,11 @@ mod browser {
                     )))
                     .await
                     .expect("Failed to send event");
+                QueueJob::Retry(completed)
             } else {
                 unreachable!("Unexpected response");
-            }
-            let completed: Job<Requested, Platform> = job.into();
-            vec![QueueJob::Completed(completed)]
+            };
+            vec![q_job]
         }
     }
 
@@ -471,7 +477,7 @@ mod browser {
 
     impl BrowserPlatformBuilder<Platform> for MyBrowserBuilder {
         fn platform(&self) -> Platform {
-            Platform::IpBrowser
+            Platform::MyBrowser
         }
 
         fn build(&self) -> Box<dyn BrowserPlatform<Platform>> {
@@ -630,7 +636,7 @@ mod monitor {
 }
 
 mod server {
-    use crate::{FAILURE_MESSAGE, SUCCESS_MESSAGE};
+    use crate::{Platform, FAILURE_MESSAGE, SUCCESS_MESSAGE};
     use actix_web::{
         dev::ServerHandle, get, http::StatusCode, post, web, App, HttpServer, Responder,
     };
@@ -644,13 +650,15 @@ mod server {
     #[derive(Debug, Clone)]
     pub struct JobInfo {
         pub job_hash: u128,
+        pub platform: Platform,
         pub ts: quanta::Instant,
     }
 
     impl JobInfo {
-        pub fn new(hash: u128) -> Self {
+        pub fn new(hash: u128, platform: Platform) -> Self {
             Self {
                 job_hash: hash,
+                platform,
                 ts: quanta::Instant::now(),
             }
         }
@@ -684,7 +692,7 @@ mod server {
     ) -> String {
         info!("Received GET request for job hash: {}", job_hash);
         let job_hash: u128 = job_hash.parse().unwrap();
-        let job_info = JobInfo::new(job_hash.clone());
+        let job_info = JobInfo::new(job_hash.clone(), Platform::MyBrowser);
         if rand_success() {
             events
                 .send(ServerEvent::GetSuccess(job_info))
@@ -708,7 +716,7 @@ mod server {
     ) -> impl Responder {
         info!("Received POST request for job hash: {}", job.job_hash);
         let job_hash: u128 = job.job_hash.parse().unwrap();
-        let job_info = JobInfo::new(job_hash.clone());
+        let job_info = JobInfo::new(job_hash.clone(), Platform::MyHttp);
         if rand_success() {
             events
                 .send(ServerEvent::InfoSuccess(job_info))
@@ -763,19 +771,43 @@ mod server {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
+struct ExecutionConfig {
+    http_workers: u16,
+    browser_workers: u16,
+    send_req_timeout_ms: u64,
+    max_requests: u32,
+    timeout_ms: u32,
+    shutdown_after_s: u64,
+}
+
+pub type EndInstant = quanta::Instant;
+
 async fn my_main(
     rm_db: bool,
     server_addr: (&str, u16),
     server_workers: usize,
-    http_workers: u16,
-    browser_workers: u16,
-    send_req_timeout_ms: u64,
-    timeout_ms: u32,
-    shutdown_after_s: u64,
-) -> Result<Vec<GlobalEvent>> {
+    execution_config: ExecutionConfig,
+) -> Result<(EndInstant, Vec<GlobalEvent>)> {
     dotenv::dotenv().ok();
     tracing_subscriber::fmt::init();
     info!("Starting up");
+
+    let (
+        http_workers,
+        browser_workers,
+        send_req_timeout_ms,
+        max_requests,
+        timeout_ms,
+        shutdown_after_s,
+    ) = (
+        execution_config.http_workers,
+        execution_config.browser_workers,
+        execution_config.send_req_timeout_ms,
+        execution_config.max_requests,
+        execution_config.timeout_ms,
+        execution_config.shutdown_after_s,
+    );
 
     if rm_db {
         let db_path = PathBuf::from("concurrent_tor.sqlite3");
@@ -790,19 +822,19 @@ async fn my_main(
 
     let ct_config = ScraperConfig {
         workers: WorkerConfig {
-            target_circulation: 10,
+            target_circulation: ((http_workers + browser_workers) * 2) as u32,
             http_workers,
             browser_workers,
         },
         http_platforms: hashmap!(
-            Platform::IpHttp => HttpPlatformConfig {
-                max_requests: 10,
+            Platform::MyHttp => HttpPlatformConfig {
+                max_requests,
                 timeout_ms,
             }
         ),
         browser_platforms: hashmap!(
-            Platform::IpBrowser => BrowserPlatformConfig {
-                max_requests: 10,
+            Platform::MyBrowser => BrowserPlatformConfig {
+                max_requests,
                 timeout_ms,
             }
         ),
@@ -832,9 +864,11 @@ async fn my_main(
     .await?;
 
     let stop = ct.graceful_stop();
-    tokio::task::spawn(async move {
+    let ts_end = tokio::task::spawn(async move {
         tokio::time::sleep(tokio::time::Duration::from_secs(shutdown_after_s)).await;
+        let ts_end = quanta::Instant::now();
         stop().await.expect("Failed to stop runtime");
+        ts_end
     });
 
     ct.join().await?;
@@ -849,18 +883,476 @@ async fn my_main(
     let mut events = all_events.lock().await;
     events.sort_by(|a, b| a.instant().cmp(&b.instant()));
     let events = events.iter().map(|e| e.clone()).collect();
-    Ok(events)
+
+    let ts_end = ts_end.await?;
+    Ok((ts_end, events))
 }
 
 mod tests {
+    use crate::monitor::GlobalEvent;
+    use crate::server::ServerEvent;
+    use crate::{EndInstant, ExecutionConfig, ImplementationEvent, JobHash, Platform};
+    use concurrent_tor::execution::monitor::Event;
+    use concurrent_tor::quanta_zero;
+    use std::collections::HashMap;
+
+    #[derive(Debug)]
+    struct JobData {
+        job_hash: u128,
+        platform: Platform,
+        ts: quanta::Instant,
+    }
+
+    impl JobData {
+        fn new(job_hash: u128, platform: Platform, ts: quanta::Instant) -> Self {
+            Self {
+                job_hash,
+                platform,
+                ts,
+            }
+        }
+    }
+    #[derive(Debug)]
+
+    enum JobVerificationEvent {
+        ImplNewJobSent(JobData),
+
+        CTNewJobReceived(JobData),
+
+        ServerSuccess(JobData),
+        ServerFailure(JobData),
+
+        ImplRequestSucceeded(JobData),
+        ImplRequestFailed(JobData),
+
+        CTJobProcessed(JobData),
+
+        CTJobCompleted(JobData),
+        CTJobRetry(JobData),
+        CTJobFailed(JobData),
+    }
+
+    impl JobVerificationEvent {
+        pub fn data(&self) -> &JobData {
+            match self {
+                JobVerificationEvent::ImplNewJobSent(data) => data,
+                JobVerificationEvent::CTNewJobReceived(data) => data,
+                JobVerificationEvent::ServerSuccess(data) => data,
+                JobVerificationEvent::ServerFailure(data) => data,
+                JobVerificationEvent::ImplRequestSucceeded(data) => data,
+                JobVerificationEvent::ImplRequestFailed(data) => data,
+                JobVerificationEvent::CTJobProcessed(data) => data,
+                JobVerificationEvent::CTJobCompleted(data) => data,
+                JobVerificationEvent::CTJobRetry(data) => data,
+                JobVerificationEvent::CTJobFailed(data) => data,
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct PlatformData {
+        platform: Platform,
+        ts: quanta::Instant,
+    }
+
+    impl PlatformData {
+        fn new(platform: Platform, ts: quanta::Instant) -> Self {
+            Self { platform, ts }
+        }
+    }
+
+    #[derive(Debug)]
+    enum PlatformVerificationEvent {
+        CTRequestMade(PlatformData),
+        RenewClient(PlatformData),
+        RateLimited(PlatformData),
+    }
+
+    impl PlatformVerificationEvent {
+        pub fn data(&self) -> &PlatformData {
+            match self {
+                PlatformVerificationEvent::CTRequestMade(data) => data,
+                PlatformVerificationEvent::RenewClient(data) => data,
+                PlatformVerificationEvent::RateLimited(data) => data,
+            }
+        }
+    }
+
+    fn transform_into_platforms_and_jobs(
+        events: Vec<GlobalEvent>,
+    ) -> (
+        HashMap<JobHash, Vec<JobVerificationEvent>>,
+        HashMap<Platform, Vec<PlatformVerificationEvent>>,
+    ) {
+        type JVE = JobVerificationEvent;
+        type PVE = PlatformVerificationEvent; // hehe, proxmox
+        let mut platforms: HashMap<Platform, Vec<PVE>> = HashMap::new();
+        let mut jobs: HashMap<JobHash, Vec<JVE>> = HashMap::new();
+        for event in events {
+            match event {
+                // First send job in cron
+                GlobalEvent::Implementation((ts, ImplementationEvent::CronSendHttp((_, hash)))) => {
+                    assert!(!jobs.contains_key(&hash));
+                    jobs.insert(
+                        hash,
+                        vec![JVE::ImplNewJobSent(JobData::new(
+                            hash,
+                            Platform::MyHttp,
+                            ts,
+                        ))],
+                    );
+                }
+                GlobalEvent::Implementation((
+                    _,
+                    ImplementationEvent::CronSendBrowser((ts, hash)),
+                )) => {
+                    assert!(!jobs.contains_key(&hash));
+                    jobs.insert(
+                        hash,
+                        vec![JVE::ImplNewJobSent(JobData::new(
+                            hash,
+                            Platform::MyBrowser,
+                            ts,
+                        ))],
+                    );
+                }
+
+                // Then receive http job in concurrent_tor
+                GlobalEvent::Monitor((ts, Event::NewJob(info))) => {
+                    assert!(jobs.contains_key(&info.job_hash));
+                    jobs.get_mut(&info.job_hash)
+                        .unwrap()
+                        .push(JVE::CTNewJobReceived(JobData::new(
+                            info.job_hash,
+                            info.platform,
+                            ts,
+                        )));
+                }
+
+                // Then receive event in server
+                GlobalEvent::Server((ts, ServerEvent::InfoSuccess(info))) => {
+                    assert!(jobs.contains_key(&info.job_hash));
+                    jobs.get_mut(&info.job_hash)
+                        .unwrap()
+                        .push(JVE::ServerSuccess(JobData::new(
+                            info.job_hash,
+                            info.platform,
+                            ts,
+                        )));
+                }
+                GlobalEvent::Server((ts, ServerEvent::GetSuccess(info))) => {
+                    assert!(jobs.contains_key(&info.job_hash));
+                    jobs.get_mut(&info.job_hash)
+                        .unwrap()
+                        .push(JVE::ServerSuccess(JobData::new(
+                            info.job_hash,
+                            info.platform,
+                            ts,
+                        )));
+                }
+                GlobalEvent::Server((ts, ServerEvent::InfoFailure(info))) => {
+                    assert!(jobs.contains_key(&info.job_hash));
+                    jobs.get_mut(&info.job_hash)
+                        .unwrap()
+                        .push(JVE::ServerFailure(JobData::new(
+                            info.job_hash,
+                            info.platform,
+                            ts,
+                        )));
+                }
+                GlobalEvent::Server((ts, ServerEvent::GetFailure(info))) => {
+                    assert!(jobs.contains_key(&info.job_hash));
+                    jobs.get_mut(&info.job_hash)
+                        .unwrap()
+                        .push(JVE::ServerFailure(JobData::new(
+                            info.job_hash,
+                            info.platform,
+                            ts,
+                        )));
+                }
+
+                // Then make receive post-request in implementation
+                GlobalEvent::Implementation((
+                    _,
+                    ImplementationEvent::MadeHttpRequest((ts, hash, success)),
+                )) => {
+                    assert!(jobs.contains_key(&hash));
+                    if success {
+                        jobs.get_mut(&hash)
+                            .unwrap()
+                            .push(JVE::ImplRequestSucceeded(JobData::new(
+                                hash,
+                                Platform::MyHttp,
+                                ts,
+                            )));
+                    } else {
+                        jobs.get_mut(&hash)
+                            .unwrap()
+                            .push(JVE::ImplRequestFailed(JobData::new(
+                                hash,
+                                Platform::MyHttp,
+                                ts,
+                            )));
+                    }
+                }
+                GlobalEvent::Implementation((
+                    _,
+                    ImplementationEvent::MadeBrowserRequest((ts, hash, success)),
+                )) => {
+                    assert!(jobs.contains_key(&hash));
+                    if success {
+                        jobs.get_mut(&hash)
+                            .unwrap()
+                            .push(JVE::ImplRequestSucceeded(JobData::new(
+                                hash,
+                                Platform::MyBrowser,
+                                ts,
+                            )));
+                    } else {
+                        jobs.get_mut(&hash)
+                            .unwrap()
+                            .push(JVE::ImplRequestFailed(JobData::new(
+                                hash,
+                                Platform::MyBrowser,
+                                ts,
+                            )));
+                    }
+                }
+
+                // Then process job in concurrent_tor
+                GlobalEvent::Monitor((ts, Event::ProcessedJob(info))) => {
+                    assert!(jobs.contains_key(&info.job_hash));
+                    jobs.get_mut(&info.job_hash)
+                        .unwrap()
+                        .push(JVE::CTJobProcessed(JobData::new(
+                            info.job_hash,
+                            info.platform,
+                            ts,
+                        )));
+                    platforms
+                        .entry(info.platform)
+                        .or_insert(vec![])
+                        .push(PVE::CTRequestMade(PlatformData::new(info.platform, ts)));
+                }
+
+                // Then complete, retry, or fail job in concurrent_tor
+                GlobalEvent::Monitor((ts, Event::CompletedJob(info))) => {
+                    assert!(jobs.contains_key(&info.job_hash));
+                    jobs.get_mut(&info.job_hash)
+                        .unwrap()
+                        .push(JVE::CTJobCompleted(JobData::new(
+                            info.job_hash,
+                            info.platform,
+                            ts,
+                        )));
+                }
+                GlobalEvent::Monitor((ts, Event::RetryJob(info))) => {
+                    assert!(jobs.contains_key(&info.job_hash));
+                    jobs.get_mut(&info.job_hash)
+                        .unwrap()
+                        .push(JVE::CTJobRetry(JobData::new(
+                            info.job_hash,
+                            info.platform,
+                            ts,
+                        )));
+                }
+                GlobalEvent::Monitor((ts, Event::FailedJob(info))) => {
+                    assert!(jobs.contains_key(&info.job_hash));
+                    jobs.get_mut(&info.job_hash)
+                        .unwrap()
+                        .push(JVE::CTJobFailed(JobData::new(
+                            info.job_hash,
+                            info.platform,
+                            ts,
+                        )));
+                }
+
+                // After some time we will need to renew the client
+                GlobalEvent::Monitor((ts, Event::WorkerRenewingClient(info))) => {
+                    let platform = info.platform;
+                    if !platforms.contains_key(&platform) {
+                        platforms.insert(platform, vec![]);
+                    }
+                    platforms
+                        .get_mut(&platform)
+                        .unwrap()
+                        .push(PVE::RenewClient(PlatformData::new(platform, ts)));
+                }
+
+                // We could also get rate limited
+                GlobalEvent::Monitor((ts, Event::WorkerRateLimited(info))) => {
+                    let platform = info.platform;
+                    if !platforms.contains_key(&platform) {
+                        platforms.insert(platform, vec![]);
+                    }
+                    platforms
+                        .get_mut(&platform)
+                        .unwrap()
+                        .push(PVE::RateLimited(PlatformData::new(platform, ts)));
+                }
+
+                // Hard match the rest, but ignore them
+                GlobalEvent::Server((_, ServerEvent::StopServer)) => {}
+                GlobalEvent::Implementation((_, ImplementationEvent::StopServer)) => {}
+                GlobalEvent::Monitor((_, Event::MaxAttemptsReached(_))) => {}
+                GlobalEvent::Monitor((_, Event::BalanceCirculation(_))) => {}
+                GlobalEvent::Monitor((_, Event::StopMonitor)) => {}
+            }
+        }
+        (jobs, platforms)
+    }
+
+    macro_rules! assert_matches {
+        ($expression:expr, $pattern:pat $(if $guard:expr)? $(,)?) => { {
+            match $expression {
+                $pattern $(if $guard)? => {},
+                _ => panic!("Match assertion failed: `{:?} != {:?}`", $expression, stringify!($pattern))
+            }
+        } };
+    }
+
+    macro_rules! assert_matches_any {
+        ($expression:expr, $($pattern:pat $(if $guard:expr)?),+ $(,)?) => { {
+            let mut matched = false;
+            $(
+                match $expression {
+                    $pattern $(if $guard)? => { matched = true; },
+                    _ => {}
+                }
+            )+
+            if !matched {
+                panic!("Match assertion failed: `{:?} did not match any of the provided patterns`", $expression);
+            }
+        } };
+    }
+
+    fn verify_job_execution(
+        ts_end: EndInstant,
+        jobs: &Vec<JobVerificationEvent>,
+        execution_config: ExecutionConfig,
+    ) {
+        let n = jobs.len();
+        for ((i, job), nxt_job) in jobs.iter().enumerate().zip(jobs.iter().skip(1)) {
+            match job {
+                JobVerificationEvent::ImplNewJobSent(_) => {
+                    assert_matches!(nxt_job, JobVerificationEvent::CTNewJobReceived(_));
+                }
+                JobVerificationEvent::CTNewJobReceived(_) => {
+                    assert_matches_any!(
+                        nxt_job,
+                        JobVerificationEvent::ServerSuccess(_),
+                        JobVerificationEvent::ServerFailure(_)
+                    );
+                }
+                JobVerificationEvent::ServerSuccess(data) => {
+                    assert_matches!(nxt_job, JobVerificationEvent::ImplRequestSucceeded(_));
+                }
+                JobVerificationEvent::ServerFailure(data) => {
+                    assert_matches!(nxt_job, JobVerificationEvent::ImplRequestFailed(_));
+                }
+                JobVerificationEvent::ImplRequestSucceeded(_) => {
+                    assert_matches!(nxt_job, JobVerificationEvent::CTJobProcessed(_));
+                    assert!(i + 2 < n);
+                    let nxt_nxt_job = &jobs[i + 2];
+                    assert_matches!(nxt_nxt_job, JobVerificationEvent::CTJobCompleted(_));
+                }
+                JobVerificationEvent::ImplRequestFailed(data) => {
+                    assert_matches!(nxt_job, JobVerificationEvent::CTJobProcessed(_));
+                    if data.ts < ts_end {
+                        assert!(i + 2 < n);
+                        let nxt_nxt_job = &jobs[i + 2];
+                        assert_matches_any!(
+                            nxt_nxt_job,
+                            JobVerificationEvent::CTJobFailed(_),
+                            JobVerificationEvent::CTJobRetry(_)
+                        );
+                    }
+                }
+                JobVerificationEvent::CTJobProcessed(_) => {
+                    assert_matches_any!(
+                        nxt_job,
+                        JobVerificationEvent::CTJobCompleted(_),
+                        JobVerificationEvent::CTJobRetry(_),
+                        JobVerificationEvent::CTJobFailed(_)
+                    );
+                }
+                JobVerificationEvent::CTJobCompleted(_) => {
+                    unreachable!("Completed job should not be followed by any other job");
+                    // Given how we are iterating, this should never be reached
+                }
+                JobVerificationEvent::CTJobRetry(_) => {
+                    assert_matches_any!(
+                        nxt_job,
+                        JobVerificationEvent::ServerSuccess(_),
+                        JobVerificationEvent::ServerFailure(_)
+                    );
+                }
+                JobVerificationEvent::CTJobFailed(_) => {
+                    unreachable!("Failed job should not be followed by any other job");
+                    // Given how we are iterating, this should never be reached
+                }
+                // JobVerificationEvent::CTWorkerRenewingClient(_) => {
+                //     recent_ts = quanta_zero();
+                // }
+                _ => {}
+            }
+        }
+    }
+
+    fn verify_platform_execution(
+        platform: &Vec<PlatformVerificationEvent>,
+        execution_config: ExecutionConfig,
+    ) {
+        let mut recent_ts = quanta_zero();
+        let mut min_ts_diff_ms = u128::MAX;
+        let mut current_count = 0;
+        for event in platform {
+            match event {
+                PlatformVerificationEvent::CTRequestMade(data) => {
+                    current_count += 1;
+                    min_ts_diff_ms = min_ts_diff_ms.min((data.ts - recent_ts).as_micros());
+                    recent_ts = data.ts;
+                }
+                PlatformVerificationEvent::RenewClient(_) => {
+                    assert_eq!(current_count, execution_config.max_requests);
+                    recent_ts = quanta_zero();
+                    current_count = 0;
+                }
+                PlatformVerificationEvent::RateLimited(_) => {}
+            }
+        }
+        assert!(min_ts_diff_ms > execution_config.timeout_ms as u128);
+    }
+
+    fn verify_execution_of_events(
+        ts_end: EndInstant,
+        events: Vec<GlobalEvent>,
+        execution_config: ExecutionConfig,
+    ) {
+        let (jobs, platforms) = transform_into_platforms_and_jobs(events);
+        for job in jobs.values() {
+            verify_job_execution(ts_end, job, execution_config);
+        }
+        for platform in platforms.values() {
+            verify_platform_execution(platform, execution_config);
+        }
+    }
+
     #[tokio::test]
     async fn runtime_tests() {
         use super::*;
-        let events = my_main(true, SERVER_ADDR, SERVER_WORKERS, 0, 1, 500, 0, 5)
+        let execution_config = ExecutionConfig {
+            http_workers: 1,
+            browser_workers: 1,
+            send_req_timeout_ms: 100,
+            timeout_ms: 300,
+            max_requests: 3,
+            shutdown_after_s: 10,
+        };
+        let (ts_end, events) = my_main(true, SERVER_ADDR, SERVER_WORKERS, execution_config)
             .await
             .expect("Failed to run main");
-
-        println!("Events: {:?}", events);
+        verify_execution_of_events(ts_end, events, execution_config);
     }
 }
 
