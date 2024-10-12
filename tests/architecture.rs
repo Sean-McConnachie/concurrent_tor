@@ -1450,5 +1450,3 @@ mod tests {
         assert_eq!(job_counts.len(), total_job_cnt.load(Ordering::Relaxed));
     }
 }
-
-fn main() {}
