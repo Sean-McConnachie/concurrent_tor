@@ -34,9 +34,7 @@ dyn-clone = "=1.0.17"
 reqwest = { version = "0.12.8", features = ["json"] }
 quanta = "0.12.3"
 
-headless_chrome = { git = "https://github.com/rust-headless-chrome/rust-headless-chrome", features = [
-    "fetch",
-] }
+headless_chrome = { version = "1.0.15", features = ["fetch", ] }
 failure = "0.1.8"
 anyhow = "1.0.89"
 libc = "0.2.158"
