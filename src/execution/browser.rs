@@ -17,6 +17,7 @@ use async_channel::{Receiver, Sender};
 use async_trait::async_trait;
 use headless_chrome::{Browser, LaunchOptions, Tab};
 use log::{debug, info};
+use std::time::Duration;
 use std::{collections::HashMap, sync::Arc};
 use tokio::task::JoinHandle;
 
@@ -93,6 +94,7 @@ pub struct BrowserWorker<P: PlatformT, C: Client, M: MainClient<C>> {
     /// Browser handle
     browser: Browser,
     #[allow(dead_code)]
+    tab: Arc<Tab>,
     /// Headless mode
     headless: bool,
     /// Listener port
@@ -126,10 +128,13 @@ where
             browser_opts.proxy_server(Some(&socks_addr));
         }
         let browser_opts = browser_opts
+            .idle_browser_timeout(Duration::from_secs(u64::MAX))
             .headless(headless)
             .build()
             .expect("Failed to find chrome executable");
         let browser = Browser::new(browser_opts)?;
+        let tab = browser.new_tab()?;
+        tab.navigate_to("https://www.google.com")?;
         Ok(BrowserWorker {
             worker_id,
             monitor,
@@ -142,6 +147,7 @@ where
             platform_data,
             platform_impls,
             browser,
+            tab,
             headless,
             port,
             _client: std::marker::PhantomData,

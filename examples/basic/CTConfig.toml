@@ -1,0 +1,17 @@
+[workers]
+target_circulation = 10
+http_workers = 1
+browser_workers = 1
+
+[http_platforms]
+
+[http_platforms.MyHttp]
+max_requests = 10
+timeout_ms = 500
+
+[browser_platforms]
+
+[browser_platforms.MyBrowser]
+max_requests = 10
+timeout_ms = 500
+headless = true

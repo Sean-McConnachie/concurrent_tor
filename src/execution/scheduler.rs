@@ -23,9 +23,11 @@ pub trait PlatformT:
 
 pub type FromJsonFn = fn(&str) -> Result<Box<dyn WorkerRequest>>;
 
+pub type JobHash = u128;
+
 pub trait WorkerRequest: Send + Debug + DynClone {
     fn as_any(&self) -> &dyn std::any::Any;
-    fn hash(&self) -> Result<u128>;
+    fn hash(&self) -> Result<JobHash>;
     fn as_json(&self) -> String;
 }
 dyn_clone::clone_trait_object!(WorkerRequest);
@@ -507,7 +509,9 @@ where
         let mut current_circulation = -(worker_config.target_circulation as i32);
         let mut shutting_down = false;
         loop {
+            error!("Waiting for job");
             let status = request_job.recv().await?;
+            error!("Received status: {:?}", status);
             match status {
                 QueueJobStatus::NewJobArrived => {
                     if !shutting_down {
@@ -559,6 +563,7 @@ where
                             })
                             .await?;
                     }
+                    info!("Sent all stop signals to workers");
                     shutting_down = true;
                 }
                 QueueJobStatus::StopProgram => {

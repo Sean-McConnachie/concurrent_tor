@@ -1,3 +1,5 @@
+use std::fmt::{Display, Formatter};
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug)]
@@ -17,7 +19,16 @@ pub enum Error {
     Other(Box<dyn std::error::Error>),
 }
 
+impl Display for Error {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl std::error::Error for Error {}
+
 unsafe impl Send for Error {}
+unsafe impl Sync for Error {}
 
 impl From<async_channel::RecvError> for Error {
     fn from(e: async_channel::RecvError) -> Self {

@@ -25,12 +25,12 @@ use hyper::{
 use hyper_util::rt::TokioIo;
 use log::{debug, error, warn};
 use reqwest::Url;
-use std::time::Duration;
 use std::{
     collections::HashMap,
     fmt::Debug,
     str::FromStr,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},

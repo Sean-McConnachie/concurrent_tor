@@ -892,7 +892,7 @@ async fn my_main(
     )
     .await?;
 
-    let stop = ct.graceful_stop();
+    let stop = ct.graceful_stop_fn();
     let ts_end = tokio::task::spawn(async move {
         tokio::time::sleep(tokio::time::Duration::from_secs(shutdown_after_s)).await;
         let ts_end = quanta::Instant::now();
@@ -924,8 +924,7 @@ mod tests {
     };
     use concurrent_tor::{execution::monitor::Event, quanta_zero};
     use log::info;
-    use std::collections::HashMap;
-    use std::sync::atomic::Ordering;
+    use std::{collections::HashMap, sync::atomic::Ordering};
 
     #[allow(dead_code)]
     #[derive(Debug)]

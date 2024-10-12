@@ -230,7 +230,7 @@ where
         Ok(())
     }
 
-    pub fn graceful_stop(
+    pub fn graceful_stop_fn(
         &self,
     ) -> impl FnOnce() -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
         let stop_queue_worker = self.stop_queue_worker.clone();

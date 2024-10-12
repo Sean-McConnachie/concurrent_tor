@@ -1,3 +1,4 @@
 /target
 /.idea
 concurrent_tor.sqlite3
+examples/basic/concurrent_tor.sqlite3
