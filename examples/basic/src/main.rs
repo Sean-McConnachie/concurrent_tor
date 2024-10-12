@@ -116,10 +116,13 @@ mod cron {
         exports::{async_trait, AsyncChannelSender},
         Result,
     };
-    use log::{debug, info};
-    use std::sync::{
-        atomic::{AtomicBool, AtomicUsize},
-        Arc,
+    use log::info;
+    use std::{
+        sync::{
+            atomic::{AtomicBool, AtomicUsize},
+            Arc,
+        },
+        time::Duration,
     };
     use tokio::time::sleep;
 
@@ -172,7 +175,7 @@ mod cron {
                         )))
                         .await
                         .expect("Failed to send event");
-                    debug!("Sent http job");
+                    info!("Sent http job");
                     self.job_count
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     sleep(Duration::from_millis(self.sleep_ms)).await;
@@ -189,7 +192,7 @@ mod cron {
                         )))
                         .await
                         .expect("Failed to send event");
-                    debug!("Sent browser job");
+                    info!("Sent browser job");
                     self.job_count
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     sleep(Duration::from_millis(self.sleep_ms)).await;
@@ -921,7 +924,8 @@ mod tests {
     };
     use concurrent_tor::{execution::monitor::Event, quanta_zero};
     use log::info;
-    use std::{collections::HashMap, sync::atomic::Ordering};
+    use std::collections::HashMap;
+    use std::sync::atomic::Ordering;
 
     #[allow(dead_code)]
     #[derive(Debug)]
@@ -1446,3 +1450,5 @@ mod tests {
         assert_eq!(job_counts.len(), total_job_cnt.load(Ordering::Relaxed));
     }
 }
+
+fn main() {}
