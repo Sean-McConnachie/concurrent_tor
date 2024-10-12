@@ -116,7 +116,7 @@ mod cron {
         exports::{async_trait, AsyncChannelSender},
         Result,
     };
-    use log::info;
+    use log::{debug, info};
     use std::{
         sync::{
             atomic::{AtomicBool, AtomicUsize},
@@ -175,7 +175,7 @@ mod cron {
                         )))
                         .await
                         .expect("Failed to send event");
-                    info!("Sent http job");
+                    debug!("Sent http job");
                     self.job_count
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     sleep(Duration::from_millis(self.sleep_ms)).await;
@@ -192,7 +192,7 @@ mod cron {
                         )))
                         .await
                         .expect("Failed to send event");
-                    info!("Sent browser job");
+                    debug!("Sent browser job");
                     self.job_count
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     sleep(Duration::from_millis(self.sleep_ms)).await;
@@ -924,8 +924,7 @@ mod tests {
     };
     use concurrent_tor::{execution::monitor::Event, quanta_zero};
     use log::info;
-    use std::collections::HashMap;
-    use std::sync::atomic::Ordering;
+    use std::{collections::HashMap, sync::atomic::Ordering};
 
     #[allow(dead_code)]
     #[derive(Debug)]
