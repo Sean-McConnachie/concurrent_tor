@@ -15,7 +15,7 @@ use crate::{
 };
 use async_channel::{Receiver, Sender};
 use async_trait::async_trait;
-use headless_chrome::{Browser, LaunchOptions, Tab};
+use headless_chrome::{Browser, FetcherOptions, LaunchOptions, Revision, Tab};
 use log::{debug, info};
 use std::time::Duration;
 use std::{collections::HashMap, sync::Arc};
@@ -94,7 +94,6 @@ pub struct BrowserWorker<P: PlatformT, C: Client, M: MainClient<C>> {
     /// Browser handle
     browser: Browser,
     #[allow(dead_code)]
-    tab: Arc<Tab>,
     /// Headless mode
     headless: bool,
     /// Listener port
@@ -121,20 +120,20 @@ where
         headless: bool,
         port: u16,
     ) -> Result<Self> {
-        debug!("Creating browser worker {}", worker_id);
+        info!("Creating browser worker {}", worker_id);
         let socks_addr = Self::format_socks_proxy_addr(port);
         let mut browser_opts = LaunchOptions::default_builder();
         if M::use_proxy() {
             browser_opts.proxy_server(Some(&socks_addr));
         }
+        let proxy_handle = Self::start_proxy_handle(worker_id, &main_client, port);
         let browser_opts = browser_opts
+            .fetcher_options(FetcherOptions::default().with_revision(Revision::Latest))
             .idle_browser_timeout(Duration::from_secs(u64::MAX))
-            .headless(headless)
+            .headless(false)
             .build()
             .expect("Failed to find chrome executable");
         let browser = Browser::new(browser_opts)?;
-        let tab = browser.new_tab()?;
-        tab.navigate_to("https://www.google.com")?;
         Ok(BrowserWorker {
             worker_id,
             monitor,
@@ -142,12 +141,11 @@ where
             recv_job,
             requeue_job,
             queue_job,
-            proxy_handle: Self::start_proxy_handle(worker_id, &main_client, port),
+            proxy_handle,
             main_client,
             platform_data,
             platform_impls,
             browser,
-            tab,
             headless,
             port,
             _client: std::marker::PhantomData,
@@ -212,13 +210,13 @@ where
                         .unwrap()
                         .process_job(&job, tab.clone())
                         .await;
-                    // tokio::task::spawn_blocking(move || match tab.close(false) {
-                    //     Ok(_) => {}
-                    //     Err(e) => {
-                    //         debug!("Failed to close tab: {:?}. Already closed?", e);
-                    //     }
-                    // })
-                    // .await?;
+                    tokio::task::spawn_blocking(move || match tab.close(false) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            debug!("Failed to close tab: {:?}. Already closed?", e);
+                        }
+                    })
+                    .await?;
                     worker_job_logic_process(
                         ts_start,
                         self.worker_id,
@@ -234,6 +232,7 @@ where
                 }
             }
         }
+        info!("Stopping browser worker {}", self.worker_id);
         Ok(())
     }
 }

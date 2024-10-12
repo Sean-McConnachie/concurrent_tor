@@ -509,9 +509,7 @@ where
         let mut current_circulation = -(worker_config.target_circulation as i32);
         let mut shutting_down = false;
         loop {
-            error!("Waiting for job");
             let status = request_job.recv().await?;
-            error!("Received status: {:?}", status);
             match status {
                 QueueJobStatus::NewJobArrived => {
                     if !shutting_down {

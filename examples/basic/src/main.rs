@@ -14,12 +14,12 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     // Remove database for this example
-    const DATABASE_FP: &str = "concurrent_tor.sqlite";
+    const DATABASE_FP: &str = "concurrent_tor.sqlite3";
     if fs::exists(DATABASE_FP)? {
         fs::remove_file(DATABASE_FP)?;
     }
 
-    const STOP_AFTER_S: u64 = 1;
+    const STOP_AFTER_S: u64 = 7;
     const SEND_TIMEOUT_MS: u64 = 500;
 
     let ct_config = ScraperConfig::<Platform>::init("CTConfig.toml")?;

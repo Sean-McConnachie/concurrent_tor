@@ -23,7 +23,7 @@ use hyper::{
     Method, Request, Uri,
 };
 use hyper_util::rt::TokioIo;
-use log::{debug, error, warn};
+use log::{debug, error, info, warn};
 use reqwest::Url;
 use std::{
     collections::HashMap,
@@ -313,7 +313,7 @@ where
             tokio::time::sleep(Duration::from_millis(TIMEOUT_AFTER_REQUEUE_MS)).await;
         }
         PlatformCanRequest::MaxRequests => {
-            debug!("Max requests for http worker {}", worker_id);
+            info!("Max requests for worker {}. Renewing client", worker_id);
             // Return the job so another worker can process it, or we can retry later
 
             requeue_job

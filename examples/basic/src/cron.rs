@@ -47,10 +47,10 @@ impl CronPlatform<Platform> for Cron {
                     info!("Sending http job.");
                     Self::build_http_job()
                 },
-                // move || {
-                //     info!("Sending browser job.");
-                //     Self::build_browser_job()
-                // },
+                move || {
+                    info!("Sending browser job.");
+                    Self::build_browser_job()
+                },
             ]
             .iter()
             {

@@ -188,6 +188,7 @@ where
                 }
             }
         }
+        info!("Stopping http worker {}", self.worker_id);
         Ok(())
     }
 }

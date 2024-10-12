@@ -57,6 +57,7 @@ impl HttpPlatform<Platform, ClientBackend> for MyHttp {
         client: &ClientBackend,
     ) -> Vec<QueueJob<Platform>> {
         let req: &MyHttpRequest = job.request.as_any().downcast_ref().unwrap();
+        info!("Processing http request: {:?}", req);
         let resp = client
             .make_request(HttpMethod::GET, &req.url, None, None)
             .await

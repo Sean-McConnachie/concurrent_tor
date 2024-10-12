@@ -56,6 +56,7 @@ impl BrowserPlatform<Platform> for MyBrowser {
         tab: Arc<Tab>,
     ) -> Vec<QueueJob<Platform>> {
         let req: &MyBrowserRequest = job.request.as_any().downcast_ref().unwrap();
+        info!("Processing browser request: {:?}", req);
         let url = req.url.clone();
         let handle = tokio::task::spawn_blocking(move || {
             tab.navigate_to(&url).unwrap();
