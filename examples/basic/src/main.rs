@@ -1,5 +1,4 @@
-use crate::monitor::GlobalEvent;
-use crate::server::ServerEvent;
+use crate::{monitor::GlobalEvent, server::ServerEvent};
 use concurrent_tor::{
     config::{BrowserPlatformConfig, HttpPlatformConfig, ScraperConfig, WorkerConfig},
     execution::{
@@ -12,7 +11,10 @@ use concurrent_tor::{
 use local_client::*;
 use log::info;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    sync::{atomic::AtomicUsize, Arc},
+};
 
 const SERVER_ADDR: (&str, u16) = ("127.0.0.1", 8080);
 const SERVER_WORKERS: usize = 4;
@@ -91,7 +93,7 @@ pub type EventInstant = quanta::Instant;
 pub type JobHash = u128;
 pub type Success = bool;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum ImplementationEvent {
     CronSendHttp((EventInstant, JobHash)),
     CronSendBrowser((EventInstant, JobHash)),
@@ -106,23 +108,26 @@ mod cron {
     use super::{ImplementationEvent, JobHash, Platform, SERVER_ADDR};
     use crate::{browser::MyBrowserRequest, http::MyHttpRequest};
     use async_channel::Sender;
-    use concurrent_tor::execution::scheduler::WorkerRequest;
     use concurrent_tor::{
         execution::{
             cron::{CronPlatform, CronPlatformBuilder},
-            scheduler::{Job, NotRequested, QueueJob},
+            scheduler::{Job, NotRequested, QueueJob, WorkerRequest},
         },
         exports::{async_trait, AsyncChannelSender},
         Result,
     };
     use log::info;
     use std::{
-        sync::{atomic::AtomicBool, Arc},
+        sync::{
+            atomic::{AtomicBool, AtomicUsize},
+            Arc,
+        },
         time::Duration,
     };
     use tokio::time::sleep;
 
     pub struct Cron {
+        job_count: Arc<AtomicUsize>,
         sleep_ms: u64,
         use_http: bool,
         use_browser: bool,
@@ -150,6 +155,10 @@ mod cron {
     #[async_trait]
     impl CronPlatform<Platform> for Cron {
         async fn start(self: Box<Self>) -> Result<()> {
+            info!(
+                "Starting cron. Http enabled: {}, Browser enabled: {}",
+                self.use_http, self.use_browser
+            );
             loop {
                 if self.stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
                     break;
@@ -167,6 +176,8 @@ mod cron {
                         .await
                         .expect("Failed to send event");
                     info!("Sent http job");
+                    self.job_count
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     sleep(Duration::from_millis(self.sleep_ms)).await;
                 }
 
@@ -182,6 +193,8 @@ mod cron {
                         .await
                         .expect("Failed to send event");
                     info!("Sent browser job");
+                    self.job_count
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     sleep(Duration::from_millis(self.sleep_ms)).await;
                 }
             }
@@ -190,6 +203,7 @@ mod cron {
     }
 
     pub struct MyCronBuilder {
+        job_count: Arc<AtomicUsize>,
         sleep_ms: u64,
         use_http: bool,
         use_browser: bool,
@@ -200,12 +214,14 @@ mod cron {
 
     impl MyCronBuilder {
         pub fn new(
+            job_count: Arc<AtomicUsize>,
             sleep_ms: u64,
             use_http: bool,
             use_browser: bool,
             events: Sender<ImplementationEvent>,
         ) -> Self {
             Self {
+                job_count,
                 sleep_ms,
                 use_http,
                 use_browser,
@@ -227,6 +243,7 @@ mod cron {
 
         fn build(&self) -> Box<dyn CronPlatform<Platform>> {
             Box::new(Cron {
+                job_count: self.job_count.clone(),
                 sleep_ms: self.sleep_ms,
                 use_http: self.use_http,
                 use_browser: self.use_browser,
@@ -242,12 +259,11 @@ mod http {
     use super::{ClientBackend, ImplementationEvent, Platform};
     use crate::server::JobPost;
     use async_channel::Sender;
-    use concurrent_tor::execution::scheduler::Requested;
     use concurrent_tor::{
         execution::{
             client::Client,
             http::{HttpPlatform, HttpPlatformBuilder},
-            scheduler::{Job, NotRequested, QueueJob, WorkerRequest},
+            scheduler::{Job, NotRequested, QueueJob, Requested, WorkerRequest},
         },
         exports::*,
         Result,
@@ -364,11 +380,10 @@ mod http {
 mod browser {
     use super::{ImplementationEvent, Platform, FAILURE_MESSAGE, SUCCESS_MESSAGE};
     use async_channel::Sender;
-    use concurrent_tor::execution::scheduler::Requested;
     use concurrent_tor::{
         execution::{
             browser::{BrowserPlatform, BrowserPlatformBuilder},
-            scheduler::{Job, NotRequested, QueueJob, WorkerRequest},
+            scheduler::{Job, NotRequested, QueueJob, Requested, WorkerRequest},
         },
         exports::*,
         Result,
@@ -496,7 +511,7 @@ mod monitor {
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, Copy)]
     pub enum GlobalEvent {
         Server((EventInstant, ServerEvent)),
         Monitor((EventInstant, Event<Platform>)),
@@ -647,7 +662,7 @@ mod server {
     use tokio::task::JoinHandle;
 
     #[allow(dead_code)]
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, Copy)]
     pub struct JobInfo {
         pub job_hash: u128,
         pub platform: Platform,
@@ -665,7 +680,7 @@ mod server {
     }
 
     #[allow(dead_code)]
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, Copy)]
     pub enum ServerEvent {
         InfoSuccess(JobInfo),
         GetSuccess(JobInfo),
@@ -785,13 +800,14 @@ pub type EndInstant = quanta::Instant;
 
 async fn my_main(
     rm_db: bool,
+    disable_cron: bool,
+    job_count: Arc<AtomicUsize>,
     server_addr: (&str, u16),
     server_workers: usize,
     execution_config: ExecutionConfig,
 ) -> Result<(EndInstant, Vec<GlobalEvent>)> {
-    dotenv::dotenv().ok();
-    tracing_subscriber::fmt::init();
-    info!("Starting up");
+    info!("Starting up with config: {:?}", execution_config);
+    info!("rm_db: {}, disable_cron: {}", rm_db, disable_cron);
 
     let (
         http_workers,
@@ -839,6 +855,18 @@ async fn my_main(
             }
         ),
     };
+
+    let use_http = if !disable_cron {
+        http_workers > 0
+    } else {
+        false
+    };
+    let use_browser = if !disable_cron {
+        browser_workers > 0
+    } else {
+        false
+    };
+
     let monitor = monitor::MyMonitor::new(server_events_rx, implementation_rx);
     let all_events = monitor.events();
     let ct = CTRuntime::run(
@@ -847,9 +875,10 @@ async fn my_main(
         SimpleScheduler::new(),
         build_main_client().await?,
         vec![cron_box(cron::MyCronBuilder::new(
+            job_count.clone(),
             send_req_timeout_ms,
-            http_workers > 0,
-            browser_workers > 0,
+            use_http,
+            use_browser,
             implementation_tx.clone(),
         ))],
         ct_config.http_platforms,
@@ -889,13 +918,16 @@ async fn my_main(
 }
 
 mod tests {
-    use crate::monitor::GlobalEvent;
-    use crate::server::ServerEvent;
-    use crate::{EndInstant, ExecutionConfig, ImplementationEvent, JobHash, Platform};
-    use concurrent_tor::execution::monitor::Event;
-    use concurrent_tor::quanta_zero;
+    use crate::{
+        monitor::GlobalEvent, server::ServerEvent, EndInstant, ExecutionConfig,
+        ImplementationEvent, JobHash, Platform,
+    };
+    use concurrent_tor::{execution::monitor::Event, quanta_zero};
+    use log::info;
     use std::collections::HashMap;
+    use std::sync::atomic::Ordering;
 
+    #[allow(dead_code)]
     #[derive(Debug)]
     struct JobData {
         job_hash: u128,
@@ -912,6 +944,8 @@ mod tests {
             }
         }
     }
+
+    #[allow(dead_code)]
     #[derive(Debug)]
 
     enum JobVerificationEvent {
@@ -932,23 +966,7 @@ mod tests {
         CTJobFailed(JobData),
     }
 
-    impl JobVerificationEvent {
-        pub fn data(&self) -> &JobData {
-            match self {
-                JobVerificationEvent::ImplNewJobSent(data) => data,
-                JobVerificationEvent::CTNewJobReceived(data) => data,
-                JobVerificationEvent::ServerSuccess(data) => data,
-                JobVerificationEvent::ServerFailure(data) => data,
-                JobVerificationEvent::ImplRequestSucceeded(data) => data,
-                JobVerificationEvent::ImplRequestFailed(data) => data,
-                JobVerificationEvent::CTJobProcessed(data) => data,
-                JobVerificationEvent::CTJobCompleted(data) => data,
-                JobVerificationEvent::CTJobRetry(data) => data,
-                JobVerificationEvent::CTJobFailed(data) => data,
-            }
-        }
-    }
-
+    #[allow(dead_code)]
     #[derive(Debug)]
     struct PlatformData {
         platform: Platform,
@@ -961,6 +979,7 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
     #[derive(Debug)]
     enum PlatformVerificationEvent {
         CTRequestMade(PlatformData),
@@ -968,18 +987,8 @@ mod tests {
         RateLimited(PlatformData),
     }
 
-    impl PlatformVerificationEvent {
-        pub fn data(&self) -> &PlatformData {
-            match self {
-                PlatformVerificationEvent::CTRequestMade(data) => data,
-                PlatformVerificationEvent::RenewClient(data) => data,
-                PlatformVerificationEvent::RateLimited(data) => data,
-            }
-        }
-    }
-
     fn transform_into_platforms_and_jobs(
-        events: Vec<GlobalEvent>,
+        events: &Vec<GlobalEvent>,
     ) -> (
         HashMap<JobHash, Vec<JobVerificationEvent>>,
         HashMap<Platform, Vec<PlatformVerificationEvent>>,
@@ -989,6 +998,7 @@ mod tests {
         let mut platforms: HashMap<Platform, Vec<PVE>> = HashMap::new();
         let mut jobs: HashMap<JobHash, Vec<JVE>> = HashMap::new();
         for event in events {
+            let event = event.clone();
             match event {
                 // First send job in cron
                 GlobalEvent::Implementation((ts, ImplementationEvent::CronSendHttp((_, hash)))) => {
@@ -1229,10 +1239,16 @@ mod tests {
     fn verify_job_execution(
         ts_end: EndInstant,
         jobs: &Vec<JobVerificationEvent>,
-        execution_config: ExecutionConfig,
+        run: usize,
+        job_count: usize,
     ) {
         let n = jobs.len();
-        for ((i, job), nxt_job) in jobs.iter().enumerate().zip(jobs.iter().skip(1)) {
+        for ((i, job), nxt_job) in jobs
+            .iter()
+            .skip(job_count)
+            .enumerate()
+            .zip(jobs.iter().skip(job_count + 1))
+        {
             match job {
                 JobVerificationEvent::ImplNewJobSent(_) => {
                     assert_matches!(nxt_job, JobVerificationEvent::CTNewJobReceived(_));
@@ -1244,21 +1260,24 @@ mod tests {
                         JobVerificationEvent::ServerFailure(_)
                     );
                 }
-                JobVerificationEvent::ServerSuccess(data) => {
+                JobVerificationEvent::ServerSuccess(_) => {
                     assert_matches!(nxt_job, JobVerificationEvent::ImplRequestSucceeded(_));
                 }
-                JobVerificationEvent::ServerFailure(data) => {
+                JobVerificationEvent::ServerFailure(_) => {
                     assert_matches!(nxt_job, JobVerificationEvent::ImplRequestFailed(_));
                 }
-                JobVerificationEvent::ImplRequestSucceeded(_) => {
+                JobVerificationEvent::ImplRequestSucceeded(data) => {
                     assert_matches!(nxt_job, JobVerificationEvent::CTJobProcessed(_));
-                    assert!(i + 2 < n);
-                    let nxt_nxt_job = &jobs[i + 2];
-                    assert_matches!(nxt_nxt_job, JobVerificationEvent::CTJobCompleted(_));
+                    if data.ts < ts_end && run == 0 {
+                        assert!(i + 2 < n);
+                        let nxt_nxt_job = &jobs[i + 2];
+                        assert_matches!(nxt_nxt_job, JobVerificationEvent::CTJobCompleted(_));
+                    }
                 }
                 JobVerificationEvent::ImplRequestFailed(data) => {
                     assert_matches!(nxt_job, JobVerificationEvent::CTJobProcessed(_));
-                    if data.ts < ts_end {
+                    if data.ts < ts_end && run == 0 {
+                        // i.e. first run. This condition is too difficult to test for in the second run
                         assert!(i + 2 < n);
                         let nxt_nxt_job = &jobs[i + 2];
                         assert_matches_any!(
@@ -1291,10 +1310,6 @@ mod tests {
                     unreachable!("Failed job should not be followed by any other job");
                     // Given how we are iterating, this should never be reached
                 }
-                // JobVerificationEvent::CTWorkerRenewingClient(_) => {
-                //     recent_ts = quanta_zero();
-                // }
-                _ => {}
             }
         }
     }
@@ -1302,7 +1317,9 @@ mod tests {
     fn verify_platform_execution(
         platform: &Vec<PlatformVerificationEvent>,
         execution_config: ExecutionConfig,
+        run: usize,
     ) {
+        let mut mistakes_made = 0;
         let mut recent_ts = quanta_zero();
         let mut min_ts_diff_ms = u128::MAX;
         let mut current_count = 0;
@@ -1314,34 +1331,70 @@ mod tests {
                     recent_ts = data.ts;
                 }
                 PlatformVerificationEvent::RenewClient(_) => {
-                    assert_eq!(current_count, execution_config.max_requests);
-                    recent_ts = quanta_zero();
-                    current_count = 0;
+                    if run == 0 {
+                        assert_eq!(current_count, execution_config.max_requests);
+                        recent_ts = quanta_zero();
+                        current_count = 0;
+                    } else {
+                        if current_count != execution_config.max_requests {
+                            mistakes_made += 1;
+                        }
+                        recent_ts = quanta_zero();
+                        current_count = 0;
+                    }
                 }
                 PlatformVerificationEvent::RateLimited(_) => {}
             }
         }
+        assert!(mistakes_made <= run);
         assert!(min_ts_diff_ms > execution_config.timeout_ms as u128);
     }
 
     fn verify_execution_of_events(
         ts_end: EndInstant,
-        events: Vec<GlobalEvent>,
+        events: &Vec<GlobalEvent>,
         execution_config: ExecutionConfig,
-    ) {
+        run: usize,
+        job_counts: Option<HashMap<JobHash, usize>>,
+    ) -> HashMap<JobHash, usize> {
         let (jobs, platforms) = transform_into_platforms_and_jobs(events);
-        for job in jobs.values() {
-            verify_job_execution(ts_end, job, execution_config);
+
+        let job_counts = if let Some(job_counts) = job_counts {
+            job_counts
+        } else {
+            let mut job_counts = HashMap::new();
+            for (hash, _job) in &jobs {
+                job_counts.insert(*hash, 0);
+            }
+            job_counts
+        };
+
+        for (hash, job) in &jobs {
+            let job_count = job_counts.get(&hash).unwrap();
+            verify_job_execution(ts_end, job, run, *job_count);
         }
         for platform in platforms.values() {
-            verify_platform_execution(platform, execution_config);
+            verify_platform_execution(platform, execution_config, run);
         }
+        let mut job_counts = HashMap::new();
+        for (hash, job) in jobs {
+            job_counts.insert(hash, job.len());
+        }
+        job_counts
     }
 
-    #[tokio::test]
-    async fn runtime_tests() {
+    #[test]
+    fn runtime_tests() {
+        dotenv::dotenv().ok();
+        tracing_subscriber::fmt::init();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap();
+
         use super::*;
-        let execution_config = ExecutionConfig {
+        let mut execution_config = ExecutionConfig {
             http_workers: 1,
             browser_workers: 1,
             send_req_timeout_ms: 100,
@@ -1349,10 +1402,52 @@ mod tests {
             max_requests: 3,
             shutdown_after_s: 10,
         };
-        let (ts_end, events) = my_main(true, SERVER_ADDR, SERVER_WORKERS, execution_config)
-            .await
-            .expect("Failed to run main");
-        verify_execution_of_events(ts_end, events, execution_config);
+        let total_job_cnt = Arc::new(AtomicUsize::new(0));
+        let (ts_end, events) = {
+            let _guard = rt.enter();
+            let handle = rt.block_on(async {
+                my_main(
+                    true,
+                    false,
+                    total_job_cnt.clone(),
+                    SERVER_ADDR,
+                    SERVER_WORKERS,
+                    execution_config,
+                )
+                .await
+            });
+            handle.expect("Failed to run main")
+        };
+
+        info!("Verifying {} events.", events.len());
+        let job_counts = verify_execution_of_events(ts_end, &events, execution_config, 0, None);
+        assert_eq!(job_counts.len(), total_job_cnt.load(Ordering::Relaxed));
+
+        execution_config.shutdown_after_s = 30;
+        let (ts_end2, events2) = {
+            let _guard = rt.enter();
+            let handle = rt.block_on(async {
+                my_main(
+                    false,
+                    true,
+                    total_job_cnt.clone(),
+                    SERVER_ADDR,
+                    SERVER_WORKERS,
+                    execution_config,
+                )
+                .await
+            });
+            handle.expect("Failed to run main")
+        };
+
+        info!("Verifying new {} events.", events2.len());
+        let all_events = events.iter().chain(events2.iter()).cloned().collect();
+        for (ev1, ev2) in events.iter().zip(events2.iter()) {
+            assert!(ev1.instant() < ev2.instant());
+        }
+        let job_counts =
+            verify_execution_of_events(ts_end2, &all_events, execution_config, 1, Some(job_counts));
+        assert_eq!(job_counts.len(), total_job_cnt.load(Ordering::Relaxed));
     }
 }
 
