@@ -8,7 +8,7 @@ use anyhow::anyhow;
 use async_channel::{Receiver, Sender};
 use dyn_clone::DynClone;
 use futures_util::TryFutureExt;
-use log::{debug, info};
+use log::{debug, info, warn};
 use serde::de::DeserializeOwned;
 use std::{collections::HashMap, fmt::Debug, hash::Hash, sync::Arc};
 use tokio::{sync::Mutex, task::JoinHandle};
@@ -286,6 +286,8 @@ where
                     )
                 })
                 .await?;
+
+            // TODO: Handle duplicate jobs in the queue
         }
         let mut shutting_down = false;
 
@@ -304,6 +306,7 @@ where
                     )
                     .await?;
                     if !shutting_down {
+                        // TODO: Handle duplicate jobs in the queue
                         monitor
                             .send(Event::NewJob(QueueJobInfo::new(
                                 job.platform,
@@ -376,26 +379,51 @@ where
                     )
                     .await?;
                     if !shutting_down {
-                        monitor
-                            .send(Event::RetryJob(QueueJobInfo::new(
-                                job.platform,
-                                quanta::Instant::now(),
+                        if job.num_attempts >= job.max_attempts {
+                            warn!(
+                                "Job with hash {} has reached max attempts. Not retrying and setting \
+                                status to failed.",
+                                job_hash
+                            );
+                            monitor
+                                .send(Event::MaxAttemptsReached(QueueJobInfo::new(
+                                    job.platform,
+                                    quanta::Instant::now(),
+                                    job_hash,
+                                    JobStatusDb::Active, // behaviour of [update_status_by_hash] in this context
+                                    job.num_attempts,
+                                    job.max_attempts,
+                                )))
+                                .await?;
+                            JobCache::<P>::update_status_by_hash(
+                                &mut db,
                                 job_hash,
-                                JobStatusDb::Active, // behaviour of [update_status_by_hash] in this context
-                                job.num_attempts,
-                                job.max_attempts,
-                            )))
+                                JobStatusDb::Failed,
+                                job.num_attempts as i32,
+                            )
                             .await?;
-                        scheduler.lock().await.enqueue(job);
-                        notify_new_job
-                            .send(QueueJobStatus::NewJobArrived)
-                            .map_err(|e| {
-                                anyhow!(
-                                    "Failed to send new job arrived signal in loop enqueue: {:?}",
-                                    e
-                                )
-                            })
-                            .await?;
+                        } else {
+                            monitor
+                                .send(Event::RetryJob(QueueJobInfo::new(
+                                    job.platform,
+                                    quanta::Instant::now(),
+                                    job_hash,
+                                    JobStatusDb::Active, // behaviour of [update_status_by_hash] in this context
+                                    job.num_attempts,
+                                    job.max_attempts,
+                                )))
+                                .await?;
+                            scheduler.lock().await.enqueue(job);
+                            notify_new_job
+                                .send(QueueJobStatus::NewJobArrived)
+                                .map_err(|e| {
+                                    anyhow!(
+                                        "Failed to send new job arrived signal in loop enqueue: {:?}",
+                                        e
+                                    )
+                                })
+                                .await?;
+                        }
                     }
                 }
                 QueueJob::SendStopProgram => {

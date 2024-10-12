@@ -1,12 +1,11 @@
 use crate::{
     config::BrowserPlatformConfig,
-    database::JobStatusDb,
     execution::{
         client::{
             worker_job_logic_process, worker_job_logic_start, Client, MainClient,
             WorkerLogicAction, WorkerType,
         },
-        monitor::{BasicWorkerInfo, Event, ProcessedJobInfo},
+        monitor::Event,
         scheduler::{
             Job, NotRequested, PlatformCanRequest, PlatformHistory, PlatformT, QueueJob,
             QueueJobStatus, WorkerAction,
@@ -14,10 +13,8 @@ use crate::{
     },
     Result,
 };
-use anyhow::anyhow;
 use async_channel::{Receiver, Sender};
 use async_trait::async_trait;
-use futures_util::TryFutureExt;
 use headless_chrome::{Browser, LaunchOptions, Tab};
 use log::{debug, info};
 use std::{collections::HashMap, sync::Arc};
@@ -32,12 +29,6 @@ pub trait BrowserPlatformBuilder<P: PlatformT>: Send {
 pub trait BrowserPlatform<P: PlatformT>: Send {
     /// Function should not fail when passed back to the API. Therefore, it should handle all errors itself.
     async fn process_job(&self, job: &Job<NotRequested, P>, tab: Arc<Tab>) -> Vec<QueueJob<P>>;
-}
-
-enum BrowserPlatformBehaviourError {
-    Ok,
-    MustWait,
-    MaxRequests,
 }
 
 pub struct BrowserPlatformData {

@@ -2,7 +2,7 @@ use crate::{
     database::JobStatusDb,
     execution::{
         http::HttpResponse,
-        monitor::{BasicWorkerInfo, Event, Monitor, ProcessedJobInfo},
+        monitor::{BasicWorkerInfo, Event, ProcessedJobInfo},
         scheduler::{
             Job, NotRequested, PlatformCanRequest, PlatformHistory, PlatformT, QueueJob,
             QueueJobStatus, WorkerAction,
@@ -28,7 +28,6 @@ use reqwest::Url;
 use std::{
     collections::HashMap,
     fmt::Debug,
-    future::Future,
     str::FromStr,
     sync::{Arc, Mutex},
 };

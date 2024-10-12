@@ -1,3 +1,4 @@
+use crate::monitor::GlobalEvent;
 use crate::server::ServerEvent;
 use concurrent_tor::{
     config::{BrowserPlatformConfig, HttpPlatformConfig, ScraperConfig, WorkerConfig},
@@ -15,6 +16,8 @@ use std::path::PathBuf;
 
 const SERVER_ADDR: (&str, u16) = ("127.0.0.1", 8080);
 const SERVER_WORKERS: usize = 4;
+const SUCCESS_MESSAGE: &str = "success1231455 43gdfuhgiudf hgdifughdfui";
+const FAILURE_MESSAGE: &str = "fail1231455 asdiuasyhdiuashduiasf hgdifughdfui";
 
 macro_rules! hashmap {
     () => {
@@ -84,9 +87,26 @@ impl PlatformT for Platform {
     }
 }
 
+pub type EventInstant = quanta::Instant;
+pub type JobHash = u128;
+pub type Success = bool;
+
+#[derive(Debug, Clone)]
+pub enum ImplementationEvent {
+    CronSendHttp((EventInstant, JobHash)),
+    CronSendBrowser((EventInstant, JobHash)),
+
+    MadeHttpRequest((EventInstant, JobHash, Success)),
+    MadeBrowserRequest((EventInstant, JobHash, Success)),
+
+    StopServer,
+}
+
 mod cron {
-    use super::{Platform, SERVER_ADDR};
+    use super::{ImplementationEvent, JobHash, Platform, SERVER_ADDR};
     use crate::{browser::MyBrowserRequest, http::MyHttpRequest};
+    use async_channel::Sender;
+    use concurrent_tor::execution::scheduler::WorkerRequest;
     use concurrent_tor::{
         execution::{
             cron::{CronPlatform, CronPlatformBuilder},
@@ -104,21 +124,26 @@ mod cron {
 
     pub struct Cron {
         sleep_ms: u64,
+        use_http: bool,
+        use_browser: bool,
+        events: Sender<ImplementationEvent>,
         queue_job: AsyncChannelSender<QueueJob<Platform>>,
         stop_flag: Arc<AtomicBool>,
     }
 
     impl Cron {
-        fn build_http_job(&self) -> Job<NotRequested, Platform> {
+        fn build_http_job(&self) -> (JobHash, Job<NotRequested, Platform>) {
             let req =
                 MyHttpRequest::new(format!("http://{}:{}/post", SERVER_ADDR.0, SERVER_ADDR.1));
-            Job::init_from_box(Platform::IpHttp, req, 3)
+            let hash = req.hash().expect("Unable to hash");
+            (hash, Job::init_from_box(Platform::IpHttp, req, 3))
         }
 
-        fn build_browser_job(&self) -> Job<NotRequested, Platform> {
+        fn build_browser_job(&self) -> (JobHash, Job<NotRequested, Platform>) {
             let req =
                 MyBrowserRequest::new(format!("http://{}:{}/get/", SERVER_ADDR.0, SERVER_ADDR.1));
-            Job::init(Platform::IpBrowser, Box::new(req), 3)
+            let hash = req.hash().expect("Unable to hash");
+            (hash, Job::init(Platform::IpBrowser, Box::new(req), 3))
         }
     }
 
@@ -130,18 +155,35 @@ mod cron {
                     break;
                 }
 
-                let job = QueueJob::New(self.build_http_job());
-                // println!("HttpCron job: {:?}", job);
-                self.queue_job.send(job).await.expect("Failed to send job");
-                info!("IpCron job sent");
+                if self.use_http {
+                    let (hash, job) = self.build_http_job();
+                    let job = QueueJob::New(job);
+                    self.queue_job.send(job).await.expect("Failed to send job");
+                    self.events
+                        .send(ImplementationEvent::CronSendHttp((
+                            quanta::Instant::now(),
+                            hash,
+                        )))
+                        .await
+                        .expect("Failed to send event");
+                    info!("Sent http job");
+                    sleep(Duration::from_millis(self.sleep_ms)).await;
+                }
 
-                sleep(Duration::from_millis(self.sleep_ms)).await;
-
-                let job = QueueJob::New(self.build_browser_job());
-                self.queue_job.send(job).await.expect("Failed to send job");
-                info!("IpCron job sent");
-
-                sleep(Duration::from_millis(self.sleep_ms)).await;
+                if self.use_browser {
+                    let (hash, job) = self.build_browser_job();
+                    let job = QueueJob::New(job);
+                    self.queue_job.send(job).await.expect("Failed to send job");
+                    self.events
+                        .send(ImplementationEvent::CronSendBrowser((
+                            quanta::Instant::now(),
+                            hash,
+                        )))
+                        .await
+                        .expect("Failed to send event");
+                    info!("Sent browser job");
+                    sleep(Duration::from_millis(self.sleep_ms)).await;
+                }
             }
             Ok(())
         }
@@ -149,14 +191,25 @@ mod cron {
 
     pub struct MyCronBuilder {
         sleep_ms: u64,
+        use_http: bool,
+        use_browser: bool,
+        events: Sender<ImplementationEvent>,
         queue_job: Option<AsyncChannelSender<QueueJob<Platform>>>,
         stop_flag: Option<Arc<AtomicBool>>,
     }
 
     impl MyCronBuilder {
-        pub fn new(sleep_ms: u64) -> Self {
+        pub fn new(
+            sleep_ms: u64,
+            use_http: bool,
+            use_browser: bool,
+            events: Sender<ImplementationEvent>,
+        ) -> Self {
             Self {
                 sleep_ms,
+                use_http,
+                use_browser,
+                events,
                 queue_job: None,
                 stop_flag: None,
             }
@@ -175,6 +228,9 @@ mod cron {
         fn build(&self) -> Box<dyn CronPlatform<Platform>> {
             Box::new(Cron {
                 sleep_ms: self.sleep_ms,
+                use_http: self.use_http,
+                use_browser: self.use_browser,
+                events: self.events.clone(),
                 queue_job: self.queue_job.clone().unwrap(),
                 stop_flag: self.stop_flag.clone().unwrap(),
             })
@@ -183,8 +239,9 @@ mod cron {
 }
 
 mod http {
-    use super::{ClientBackend, Platform};
+    use super::{ClientBackend, ImplementationEvent, Platform};
     use crate::server::JobPost;
+    use async_channel::Sender;
     use concurrent_tor::execution::scheduler::Requested;
     use concurrent_tor::{
         execution::{
@@ -232,16 +289,18 @@ mod http {
         }
     }
 
-    pub struct IpHttp {}
+    pub struct MyHttp {
+        events: Sender<ImplementationEvent>,
+    }
 
-    impl IpHttp {
-        pub fn new() -> Self {
-            Self {}
+    impl MyHttp {
+        pub fn new(events: Sender<ImplementationEvent>) -> Self {
+            Self { events }
         }
     }
 
     #[async_trait]
-    impl HttpPlatform<Platform, ClientBackend> for IpHttp {
+    impl HttpPlatform<Platform, ClientBackend> for MyHttp {
         async fn process_job(
             &self,
             job: &Job<NotRequested, Platform>,
@@ -250,10 +309,10 @@ mod http {
             let req: &MyHttpRequest = job.request.as_any().downcast_ref().unwrap();
             // println!("IpHttp job response: {:?}", job);
             let job_post = JobPost {
-                hash: req.hash().expect("Unable to hash").to_string(),
+                job_hash: req.hash().expect("Unable to hash").to_string(),
             };
             let body = Some(json_to_string(&job_post).unwrap());
-            client
+            let resp = client
                 .make_request(
                     HttpMethod::POST,
                     &req.url,
@@ -265,15 +324,25 @@ mod http {
                 .await
                 .unwrap();
             let completed: Job<Requested, Platform> = job.into();
+            self.events
+                .send(ImplementationEvent::MadeHttpRequest((
+                    quanta::Instant::now(),
+                    req.hash().expect("Unable to hash"),
+                    resp.status.is_success(),
+                )))
+                .await
+                .expect("Failed to send event");
             vec![QueueJob::Completed(completed)]
         }
     }
 
-    pub struct MyHttpBuilder {}
+    pub struct MyHttpBuilder {
+        events: Sender<ImplementationEvent>,
+    }
 
     impl MyHttpBuilder {
-        pub fn new() -> Self {
-            Self {}
+        pub fn new(events: Sender<ImplementationEvent>) -> Self {
+            Self { events }
         }
     }
 
@@ -283,13 +352,14 @@ mod http {
         }
 
         fn build(&self) -> Box<dyn HttpPlatform<Platform, ClientBackend>> {
-            Box::new(IpHttp::new())
+            Box::new(MyHttp::new(self.events.clone()))
         }
     }
 }
 
 mod browser {
-    use super::Platform;
+    use super::{ImplementationEvent, Platform, FAILURE_MESSAGE, SUCCESS_MESSAGE};
+    use async_channel::Sender;
     use concurrent_tor::execution::scheduler::Requested;
     use concurrent_tor::{
         execution::{
@@ -335,16 +405,18 @@ mod browser {
         }
     }
 
-    pub struct IpBrowser {}
+    pub struct MyBrowser {
+        events: Sender<ImplementationEvent>,
+    }
 
-    impl IpBrowser {
-        pub fn new() -> Self {
-            Self {}
+    impl MyBrowser {
+        pub fn new(events: Sender<ImplementationEvent>) -> Self {
+            Self { events }
         }
     }
 
     #[async_trait]
-    impl BrowserPlatform<Platform> for IpBrowser {
+    impl BrowserPlatform<Platform> for MyBrowser {
         async fn process_job(
             &self,
             job: &Job<NotRequested, Platform>,
@@ -357,21 +429,43 @@ mod browser {
             let handle = tokio::task::spawn_blocking(move || {
                 tab.navigate_to(&url).unwrap();
                 tab.wait_until_navigated().unwrap();
-                let _r = tab.get_content().unwrap();
-                // tab.close(true).unwrap();
-                // println!("Page content: {:?}", r);
+                let resp = tab.get_content().unwrap();
+                resp
             });
-            handle.await.unwrap();
+            let r = handle.await.unwrap();
+            if r.contains(SUCCESS_MESSAGE) {
+                self.events
+                    .send(ImplementationEvent::MadeBrowserRequest((
+                        quanta::Instant::now(),
+                        req.hash().expect("Unable to hash"),
+                        true,
+                    )))
+                    .await
+                    .expect("Failed to send event");
+            } else if r.contains(FAILURE_MESSAGE) {
+                self.events
+                    .send(ImplementationEvent::MadeBrowserRequest((
+                        quanta::Instant::now(),
+                        req.hash().expect("Unable to hash"),
+                        false,
+                    )))
+                    .await
+                    .expect("Failed to send event");
+            } else {
+                unreachable!("Unexpected response");
+            }
             let completed: Job<Requested, Platform> = job.into();
             vec![QueueJob::Completed(completed)]
         }
     }
 
-    pub struct MyBrowserBuilder {}
+    pub struct MyBrowserBuilder {
+        events: Sender<ImplementationEvent>,
+    }
 
     impl MyBrowserBuilder {
-        pub fn new() -> Self {
-            Self {}
+        pub fn new(events: Sender<ImplementationEvent>) -> Self {
+            Self { events }
         }
     }
 
@@ -381,51 +475,131 @@ mod browser {
         }
 
         fn build(&self) -> Box<dyn BrowserPlatform<Platform>> {
-            Box::new(IpBrowser::new())
+            Box::new(MyBrowser::new(self.events.clone()))
         }
     }
 }
 
 mod monitor {
-    use crate::{server::ServerEvent, Platform};
+    use crate::{server::ServerEvent, EventInstant, ImplementationEvent, Platform};
     use async_channel::Receiver;
     use concurrent_tor::{
         execution::monitor::{Event, Monitor},
         exports::{async_trait, AsyncChannelReceiver},
     };
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    #[derive(Debug, Clone)]
+    pub enum GlobalEvent {
+        Server((EventInstant, ServerEvent)),
+        Monitor((EventInstant, Event<Platform>)),
+        Implementation((EventInstant, ImplementationEvent)),
+    }
+
+    impl GlobalEvent {
+        pub fn instant(&self) -> EventInstant {
+            match self {
+                GlobalEvent::Server((instant, _)) => *instant,
+                GlobalEvent::Monitor((instant, _)) => *instant,
+                GlobalEvent::Implementation((instant, _)) => *instant,
+            }
+        }
+    }
 
     pub struct MyMonitor {
+        all_events: Arc<Mutex<Vec<GlobalEvent>>>,
         server_event: Receiver<ServerEvent>,
+        implementation_events: Receiver<ImplementationEvent>,
     }
 
     impl MyMonitor {
-        pub fn new(server_event: Receiver<ServerEvent>) -> Self {
-            MyMonitor { server_event }
+        pub fn new(
+            server_event: Receiver<ServerEvent>,
+            implementation_events: Receiver<ImplementationEvent>,
+        ) -> Self {
+            MyMonitor {
+                all_events: Arc::new(Mutex::new(Vec::new())),
+                server_event,
+                implementation_events,
+            }
         }
 
-        async fn start_server_recv(server_event: Receiver<ServerEvent>) {
+        pub fn events(&self) -> Arc<Mutex<Vec<GlobalEvent>>> {
+            self.all_events.clone()
+        }
+
+        async fn start_server_recv(
+            all_events: Arc<Mutex<Vec<GlobalEvent>>>,
+            server_event: Receiver<ServerEvent>,
+        ) {
             loop {
                 let server_event = server_event
                     .recv()
                     .await
                     .expect("Failed to receive event from the server");
-                if let ServerEvent::StopServer = server_event {
-                    break;
-                }
-                println!("Server event: {:?}", server_event);
+                let instant = match &server_event {
+                    ServerEvent::InfoSuccess(success) => success.ts,
+                    ServerEvent::GetSuccess(success) => success.ts,
+                    ServerEvent::InfoFailure(fail) => fail.ts,
+                    ServerEvent::GetFailure(fail) => fail.ts,
+                    ServerEvent::StopServer => {
+                        break;
+                    }
+                };
+                let event = GlobalEvent::Server((instant, server_event));
+                all_events.lock().await.push(event);
             }
         }
 
-        async fn start_ct_recv(event_rx: AsyncChannelReceiver<Event<Platform>>) {
+        async fn start_ct_recv(
+            all_events: Arc<Mutex<Vec<GlobalEvent>>>,
+            event_rx: AsyncChannelReceiver<Event<Platform>>,
+        ) {
             loop {
                 let ct_event = event_rx
                     .recv()
                     .await
                     .expect("Failed to receive event from the scheduler");
-                if let Event::StopMonitor = ct_event {
-                    break;
-                }
-                println!("Monitor event: {:?}", ct_event);
+                let instant = match &ct_event {
+                    Event::ProcessedJob(process) => process.ts_end,
+                    Event::WorkerRateLimited(limited) => limited.ts,
+                    Event::WorkerRenewingClient(renew) => renew.ts,
+                    Event::NewJob(new) => new.ts,
+                    Event::CompletedJob(completed) => completed.ts,
+                    Event::FailedJob(fail) => fail.ts,
+                    Event::RetryJob(retry) => retry.ts,
+                    Event::MaxAttemptsReached(max) => max.ts,
+                    Event::BalanceCirculation(balance) => balance.ts,
+                    Event::StopMonitor => {
+                        break;
+                    }
+                };
+                let event = GlobalEvent::Monitor((instant, ct_event));
+                all_events.lock().await.push(event);
+            }
+        }
+
+        async fn start_implementation_recv(
+            all_events: Arc<Mutex<Vec<GlobalEvent>>>,
+            implementation_events: Receiver<ImplementationEvent>,
+        ) {
+            loop {
+                let implementation_event = implementation_events
+                    .recv()
+                    .await
+                    .expect("Failed to receive event from the implementation");
+                let instant = match &implementation_event {
+                    ImplementationEvent::CronSendHttp((instant, _)) => *instant,
+                    ImplementationEvent::CronSendBrowser((instant, _)) => *instant,
+                    ImplementationEvent::MadeHttpRequest((instant, _, _)) => *instant,
+                    ImplementationEvent::MadeBrowserRequest((instant, _, _)) => *instant,
+                    ImplementationEvent::StopServer => {
+                        break;
+                    }
+                };
+                let event = GlobalEvent::Implementation((instant, implementation_event));
+                all_events.lock().await.push(event);
             }
         }
     }
@@ -436,9 +610,18 @@ mod monitor {
             self,
             event_rx: AsyncChannelReceiver<Event<Platform>>,
         ) -> concurrent_tor::Result<()> {
-            let _server_handle =
-                tokio::task::spawn(MyMonitor::start_server_recv(self.server_event.clone()));
-            let ct_handle = tokio::task::spawn(MyMonitor::start_ct_recv(event_rx.clone()));
+            let _server_handle = tokio::task::spawn(MyMonitor::start_server_recv(
+                self.all_events.clone(),
+                self.server_event.clone(),
+            ));
+            let ct_handle = tokio::task::spawn(MyMonitor::start_ct_recv(
+                self.all_events.clone(),
+                event_rx.clone(),
+            ));
+            let _implementation_handle = tokio::task::spawn(MyMonitor::start_implementation_recv(
+                self.all_events.clone(),
+                self.implementation_events.clone(),
+            ));
             // server_handle.await?;
             ct_handle.await?;
             Ok(())
@@ -447,6 +630,7 @@ mod monitor {
 }
 
 mod server {
+    use crate::{FAILURE_MESSAGE, SUCCESS_MESSAGE};
     use actix_web::{
         dev::ServerHandle, get, http::StatusCode, post, web, App, HttpServer, Responder,
     };
@@ -457,23 +641,23 @@ mod server {
     use tokio::task::JoinHandle;
 
     #[allow(dead_code)]
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     pub struct JobInfo {
-        pub hash: u128,
+        pub job_hash: u128,
         pub ts: quanta::Instant,
     }
 
     impl JobInfo {
         pub fn new(hash: u128) -> Self {
             Self {
-                hash,
+                job_hash: hash,
                 ts: quanta::Instant::now(),
             }
         }
     }
 
     #[allow(dead_code)]
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     pub enum ServerEvent {
         InfoSuccess(JobInfo),
         GetSuccess(JobInfo),
@@ -485,7 +669,7 @@ mod server {
 
     #[derive(Deserialize, Serialize, Debug)]
     pub struct JobPost {
-        pub hash: String,
+        pub job_hash: String,
     }
 
     fn rand_success() -> bool {
@@ -506,13 +690,13 @@ mod server {
                 .send(ServerEvent::GetSuccess(job_info))
                 .await
                 .unwrap();
-            format!("Job hash: {}", job_hash)
+            SUCCESS_MESSAGE.to_string()
         } else {
             events
                 .send(ServerEvent::GetFailure(job_info))
                 .await
                 .unwrap();
-            format!("Failed to get job hash: {}", job_hash)
+            FAILURE_MESSAGE.to_string()
         }
     }
 
@@ -522,8 +706,8 @@ mod server {
         job: web::Json<JobPost>,
         events: web::Data<Sender<ServerEvent>>,
     ) -> impl Responder {
-        info!("Received POST request for job hash: {}", job.hash);
-        let job_hash: u128 = job.hash.parse().unwrap();
+        info!("Received POST request for job hash: {}", job.job_hash);
+        let job_hash: u128 = job.job_hash.parse().unwrap();
         let job_info = JobInfo::new(job_hash.clone());
         if rand_success() {
             events
@@ -532,7 +716,7 @@ mod server {
                 .unwrap();
             let choices = vec![StatusCode::OK, StatusCode::CREATED, StatusCode::ACCEPTED];
             (
-                "success".to_string(),
+                "Successfully posted job".to_string(),
                 choices.choose(&mut OsRng::default()).unwrap().clone(),
             )
         } else {
@@ -547,7 +731,7 @@ mod server {
                 StatusCode::INTERNAL_SERVER_ERROR,
             ];
             (
-                "fail".to_string(),
+                "Failed to post job".to_string(),
                 choices.choose(&mut OsRng::default()).unwrap().clone(),
             )
         }
@@ -579,55 +763,77 @@ mod server {
     }
 }
 
-async fn my_main() -> Result<()> {
+async fn my_main(
+    rm_db: bool,
+    server_addr: (&str, u16),
+    server_workers: usize,
+    http_workers: u16,
+    browser_workers: u16,
+    send_req_timeout_ms: u64,
+    timeout_ms: u32,
+    shutdown_after_s: u64,
+) -> Result<Vec<GlobalEvent>> {
     dotenv::dotenv().ok();
     tracing_subscriber::fmt::init();
     info!("Starting up");
 
-    let db_path = PathBuf::from("concurrent_tor.sqlite3");
-    if db_path.exists() {
-        std::fs::remove_file(&db_path)?;
+    if rm_db {
+        let db_path = PathBuf::from("concurrent_tor.sqlite3");
+        if db_path.exists() {
+            std::fs::remove_file(&db_path)?;
+        }
     }
 
     let (server_handle, server_join, server_events_rx, server_events_tx) =
-        server::start_server(SERVER_ADDR, SERVER_WORKERS).await?;
+        server::start_server(server_addr, server_workers).await?;
+    let (implementation_tx, implementation_rx) = async_channel::unbounded::<ImplementationEvent>();
 
-    let send_req_timeout_ms = 500;
     let ct_config = ScraperConfig {
         workers: WorkerConfig {
             target_circulation: 10,
-            http_workers: 1,
-            browser_workers: 1,
+            http_workers,
+            browser_workers,
         },
         http_platforms: hashmap!(
             Platform::IpHttp => HttpPlatformConfig {
                 max_requests: 10,
-                timeout_ms: 0,
+                timeout_ms,
             }
         ),
         browser_platforms: hashmap!(
             Platform::IpBrowser => BrowserPlatformConfig {
                 max_requests: 10,
-                timeout_ms: 0,
+                timeout_ms,
             }
         ),
     };
+    let monitor = monitor::MyMonitor::new(server_events_rx, implementation_rx);
+    let all_events = monitor.events();
     let ct = CTRuntime::run(
         ct_config.workers,
-        monitor::MyMonitor::new(server_events_rx),
+        monitor,
         SimpleScheduler::new(),
         build_main_client().await?,
-        vec![cron_box(cron::MyCronBuilder::new(send_req_timeout_ms))],
+        vec![cron_box(cron::MyCronBuilder::new(
+            send_req_timeout_ms,
+            http_workers > 0,
+            browser_workers > 0,
+            implementation_tx.clone(),
+        ))],
         ct_config.http_platforms,
-        vec![http_box(http::MyHttpBuilder::new())],
+        vec![http_box(http::MyHttpBuilder::new(
+            implementation_tx.clone(),
+        ))],
         ct_config.browser_platforms,
-        vec![browser_box(browser::MyBrowserBuilder::new())],
+        vec![browser_box(browser::MyBrowserBuilder::new(
+            implementation_tx.clone(),
+        ))],
     )
     .await?;
 
     let stop = ct.graceful_stop();
     tokio::task::spawn(async move {
-        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(shutdown_after_s)).await;
         stop().await.expect("Failed to stop runtime");
     });
 
@@ -635,11 +841,27 @@ async fn my_main() -> Result<()> {
     server_events_tx.send(ServerEvent::StopServer).await?;
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     server_handle.stop(true).await;
+    implementation_tx
+        .send(ImplementationEvent::StopServer)
+        .await?;
     server_join.await??;
-    Ok(())
+
+    let mut events = all_events.lock().await;
+    events.sort_by(|a, b| a.instant().cmp(&b.instant()));
+    let events = events.iter().map(|e| e.clone()).collect();
+    Ok(events)
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    my_main().await
+mod tests {
+    #[tokio::test]
+    async fn runtime_tests() {
+        use super::*;
+        let events = my_main(true, SERVER_ADDR, SERVER_WORKERS, 0, 1, 500, 0, 5)
+            .await
+            .expect("Failed to run main");
+
+        println!("Events: {:?}", events);
+    }
 }
+
+fn main() {}

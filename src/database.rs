@@ -8,7 +8,7 @@ use strum::FromRepr;
 
 pub type DB = SqliteConnection;
 
-#[derive(Debug, Serialize, Deserialize, sqlx::Type, FromRepr)]
+#[derive(Debug, Serialize, Deserialize, sqlx::Type, FromRepr, Clone)]
 pub enum JobStatusDb {
     Active,
     Completed,

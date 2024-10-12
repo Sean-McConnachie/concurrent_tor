@@ -1,12 +1,11 @@
 use crate::{
     config::HttpPlatformConfig,
-    database::JobStatusDb,
     execution::{
         client::{
             worker_job_logic_process, worker_job_logic_start, Client, MainClient,
             WorkerLogicAction, WorkerType,
         },
-        monitor::{BasicWorkerInfo, Event, ProcessedJobInfo},
+        monitor::Event,
         scheduler::{
             Job, NotRequested, PlatformCanRequest, PlatformHistory, PlatformT, QueueJob,
             QueueJobStatus, Requested, WorkerAction,
@@ -14,10 +13,8 @@ use crate::{
     },
     Result,
 };
-use anyhow::anyhow;
 use async_channel::{Receiver, Sender};
 use async_trait::async_trait;
-use futures_util::TryFutureExt;
 use hyper::StatusCode;
 use log::{debug, info};
 use std::collections::HashMap;
@@ -44,12 +41,6 @@ pub struct HttpResponse {
 pub struct HttpJobResponse<P: PlatformT> {
     pub job: Job<Requested, P>,
     pub body: Result<HttpResponse>,
-}
-
-enum HttpPlatformBehaviourError {
-    Ok,
-    MustWait,
-    MaxRequests,
 }
 
 pub struct HttpPlatformData {
