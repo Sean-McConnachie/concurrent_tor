@@ -40,3 +40,9 @@ headless_chrome = { git = "https://github.com/rust-headless-chrome/rust-headless
 failure = "0.1.8"
 anyhow = "1.0.89"
 libc = "0.2.158"
+
+[dev-dependencies]
+dotenv = "0.15.0"
+actix-web = "4"
+futures = "0.3"
+rand = "0.8.5"
