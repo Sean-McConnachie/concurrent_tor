@@ -16,7 +16,7 @@ use crate::{
 use async_channel::{Receiver, Sender};
 use async_trait::async_trait;
 use hyper::StatusCode;
-use log::{debug, info, warn};
+use log::{debug, info};
 use std::collections::HashMap;
 
 pub trait HttpPlatformBuilder<P: PlatformT, C: Client>: Send {

@@ -8,7 +8,7 @@ use strum::FromRepr;
 
 pub type DB = SqliteConnection;
 
-#[derive(Debug, Serialize, Deserialize, sqlx::Type, FromRepr, Clone)]
+#[derive(Debug, Serialize, Deserialize, sqlx::Type, FromRepr, Clone, Copy)]
 pub enum JobStatusDb {
     Active,
     Completed,
@@ -99,7 +99,7 @@ where
     ) -> Result<()> {
         let hash = hash.to_string();
         sqlx::query("UPDATE job_cache SET status = $1, num_attempts = $2 WHERE hash = $3")
-            .bind(status)
+            .bind(status as i32)
             .bind(num_attempts)
             .bind(hash)
             .execute(pool)
@@ -129,6 +129,8 @@ async fn init_db(pool: &mut DB) -> Result<()> {
             max_attempts INTEGER NOT NULL,
             request TEXT NOT NULL,
             UNIQUE (hash)
+
+            ON CONFLICT FAIL
         )",
     )
     .execute(pool)

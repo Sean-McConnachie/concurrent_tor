@@ -23,8 +23,9 @@ use hyper::{
     Method, Request, Uri,
 };
 use hyper_util::rt::TokioIo;
-use log::{debug, error, info, warn};
+use log::{debug, error, warn};
 use reqwest::Url;
+use std::time::Duration;
 use std::{
     collections::HashMap,
     fmt::Debug,
@@ -38,6 +39,8 @@ use tokio::{
 use tokio_native_tls::native_tls::TlsConnector;
 use tor_config::Listen;
 use tor_rtcompat::PreferredRuntime;
+
+const TIMEOUT_AFTER_REQUEUE_MS: u64 = 100;
 
 #[async_trait]
 pub trait Client: Send + Sync {
@@ -307,6 +310,7 @@ where
                     quanta::Instant::now(),
                 )))
                 .await?;
+            tokio::time::sleep(Duration::from_millis(TIMEOUT_AFTER_REQUEUE_MS)).await;
         }
         PlatformCanRequest::MaxRequests => {
             debug!("Max requests for http worker {}", worker_id);

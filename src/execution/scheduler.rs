@@ -279,10 +279,11 @@ where
         notify_new_job: Sender<QueueJobStatus>,
         scheduler: Arc<Mutex<S>>,
     ) -> Result<()> {
-        debug!("Starting enqueue loop");
+        info!("Starting enqueue loop");
 
         // initialize the scheduler with what is in the database
         let jobs = JobCache::<P>::fetch_all_active(&mut db).await?;
+        info!("Fetched {} active jobs from the database", jobs.len());
         for job in jobs {
             let request = job.platform.request_from_json(&job.request)?;
             let job = Job::new(
@@ -291,6 +292,16 @@ where
                 job.num_attempts as u32,
                 job.max_attempts as u32,
             );
+            monitor
+                .send(Event::NewJob(QueueJobInfo::new(
+                    job.platform,
+                    quanta::Instant::now(),
+                    job.request.hash()?,
+                    JobStatusDb::Active,
+                    job.num_attempts,
+                    job.max_attempts,
+                )))
+                .await?;
             scheduler.lock().await.enqueue(job);
             notify_new_job
                 .send(QueueJobStatus::NewJobArrived)
@@ -311,7 +322,7 @@ where
             match job {
                 QueueJob::New(job) => {
                     let job_hash = job.request.hash()?;
-                    JobCache::insert_new(
+                    match JobCache::insert_new(
                         &mut db,
                         job.num_attempts as i32,
                         job.max_attempts as i32,
@@ -319,7 +330,14 @@ where
                         job.platform.clone(),
                         &job.request.as_json(),
                     )
-                    .await?;
+                    .await
+                    {
+                        Ok(_) => {}
+                        Err(e) => {
+                            error!("Failed to insert new job into database: {:?}", e);
+                            continue;
+                        }
+                    }
                     if !shutting_down {
                         // TODO: Handle duplicate jobs in the queue
                         monitor

@@ -6,7 +6,7 @@ use crate::{
 use async_channel::Receiver;
 use async_trait::async_trait;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct ProcessedJobInfo<P: PlatformT> {
     pub platform: P,
     pub status: JobStatusDb,
@@ -48,7 +48,7 @@ where
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct BasicWorkerInfo<P: PlatformT> {
     pub platform: P,
     pub worker_type: WorkerType,
@@ -70,7 +70,7 @@ where
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct QueueJobInfo<P: PlatformT> {
     pub platform: P,
     pub job_status_db: JobStatusDb,
@@ -103,7 +103,7 @@ where
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct DequeueInfo {
     pub current_circulation: i32,
     pub scheduler_len: usize,
@@ -130,7 +130,7 @@ impl DequeueInfo {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum Event<P: PlatformT> {
     ProcessedJob(ProcessedJobInfo<P>),
     WorkerRateLimited(BasicWorkerInfo<P>),
