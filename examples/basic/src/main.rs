@@ -1,4 +1,4 @@
-use basic::{backend, browser, cron, http, monitor, Platform};
+use basic::{backend, cron, headed_browser, headless_browser, http, monitor, Platform};
 use concurrent_tor::{
     browser_box,
     config::ScraperConfig,
@@ -32,7 +32,10 @@ async fn main() -> anyhow::Result<()> {
         ct_config.http_platforms,
         vec![http_box(http::MyHttpBuilder::new())],
         ct_config.browser_platforms,
-        vec![browser_box(browser::MyBrowserBuilder::new())],
+        vec![
+            browser_box(headed_browser::MyHeadedBrowserBuilder::new()),
+            browser_box(headless_browser::MyHeadlessBrowserBuilder::new()),
+        ],
     )
     .await?;
 

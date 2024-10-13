@@ -10,15 +10,45 @@ use dyn_clone::DynClone;
 use futures_util::TryFutureExt;
 use log::{debug, error, info, warn};
 use serde::de::DeserializeOwned;
-use std::{collections::HashMap, fmt::Debug, hash::Hash, sync::Arc};
+use std::{fmt::Debug, hash::Hash, sync::Arc};
+use strum::IntoEnumIterator;
 use tokio::{sync::Mutex, task::JoinHandle};
 
 pub trait PlatformT:
-    DeserializeOwned + Debug + Clone + Copy + Hash + Eq + PartialEq + Send + Sync + Unpin + 'static
+    DeserializeOwned
+    + Debug
+    + Clone
+    + Copy
+    + Hash
+    + Eq
+    + PartialEq
+    + Send
+    + Sync
+    + Unpin
+    + 'static
+    + IntoEnumIterator
 {
     fn request_from_json(&self, json: &str) -> Result<Box<dyn WorkerRequest>>;
     fn to_repr(&self) -> usize;
     fn from_repr(repr: usize) -> Self;
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum SpecificWorkerType {
+    Http,
+    HeadedBrowser,
+    HeadlessBrowser,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ChannelGroup<C, P>
+where
+    P: PlatformT,
+{
+    pub http: C,
+    pub headless_browser: C,
+    pub headed_browser: C,
+    pub(crate) _platform: std::marker::PhantomData<P>,
 }
 
 pub type FromJsonFn = fn(&str) -> Result<Box<dyn WorkerRequest>>;
@@ -186,14 +216,14 @@ pub trait Scheduler<P: PlatformT>: Send + 'static {
 }
 
 #[derive(Debug)]
-pub enum QueueJobStatus {
+pub(crate) enum QueueJobStatus {
     WorkerCompleted { worker_id: u16 },
     NewJobArrived,
     SendStopProgram,
     StopProgram,
 }
 
-pub struct JobDistributor<S: Scheduler<P>, P: PlatformT> {
+pub(crate) struct JobDistributor<S: Scheduler<P>, P: PlatformT> {
     /// Monitor
     monitor: Sender<Event<P>>,
     db: DB,
@@ -201,14 +231,12 @@ pub struct JobDistributor<S: Scheduler<P>, P: PlatformT> {
     request_job: Receiver<QueueJobStatus>,
     /// Send a signal to dequeue a job.
     notify_new_job: Sender<QueueJobStatus>,
-    /// Used only to send stop signal to http workers.
-    http_tx: Sender<WorkerAction<P>>,
-    /// Used only to send stop signal to browser workers.
-    browser_tx: Sender<WorkerAction<P>>,
     /// Receive job from a platform only.
     queue_job: Receiver<QueueJob<P>>,
     /// Send job to a worker only. HashMap because workers are Http or Browser based, not generic.
-    dequeue_job: HashMap<P, Sender<WorkerAction<P>>>,
+    dequeue_job: Vec<Sender<WorkerAction<P>>>,
+    /// Used only to send stop signal to http workers.
+    worker_rxs: ChannelGroup<Sender<WorkerAction<P>>, P>,
     scheduler: Arc<Mutex<S>>,
     worker_config: WorkerConfig,
 }
@@ -226,9 +254,8 @@ where
         request_job: Receiver<QueueJobStatus>,
         notify_new_job: Sender<QueueJobStatus>,
         queue_job: Receiver<QueueJob<P>>,
-        dequeue_job: HashMap<P, Sender<WorkerAction<P>>>,
-        http_tx: Sender<WorkerAction<P>>,
-        browser_tx: Sender<WorkerAction<P>>,
+        dequeue_job: Vec<Sender<WorkerAction<P>>>,
+        worker_rxs: ChannelGroup<Sender<WorkerAction<P>>, P>,
         scheduler: S,
         worker_config: WorkerConfig,
     ) -> Self {
@@ -239,8 +266,7 @@ where
             notify_new_job,
             queue_job,
             dequeue_job,
-            http_tx,
-            browser_tx,
+            worker_rxs,
             scheduler: Arc::new(Mutex::new(scheduler)),
             worker_config,
         }
@@ -264,8 +290,7 @@ where
                 self.monitor,
                 self.request_job,
                 self.dequeue_job,
-                self.http_tx,
-                self.browser_tx,
+                self.worker_rxs,
                 self.scheduler,
                 self.worker_config,
             )
@@ -496,9 +521,8 @@ where
     async fn loop_dequeue(
         monitor: Sender<Event<P>>,
         request_job: Receiver<QueueJobStatus>,
-        dequeue_job: HashMap<P, Sender<WorkerAction<P>>>,
-        http_tx: Sender<WorkerAction<P>>,
-        browser_tx: Sender<WorkerAction<P>>,
+        dequeue_job: Vec<Sender<WorkerAction<P>>>,
+        worker_rxs: ChannelGroup<Sender<WorkerAction<P>>, P>,
         scheduler: Arc<Mutex<S>>,
         worker_config: WorkerConfig,
     ) -> Result<()> {
@@ -517,8 +541,7 @@ where
                             worker_config.target_circulation as i32,
                             &mut current_circulation,
                             &scheduler,
-                            &http_tx,
-                            &browser_tx,
+                            &worker_rxs,
                             &monitor,
                             &dequeue_job,
                         )
@@ -534,8 +557,7 @@ where
                             worker_config.target_circulation as i32,
                             &mut current_circulation,
                             &scheduler,
-                            &http_tx,
-                            &browser_tx,
+                            &worker_rxs,
                             &monitor,
                             &dequeue_job,
                         )
@@ -545,16 +567,28 @@ where
                 QueueJobStatus::SendStopProgram => {
                     info!("Sending stop signal to http workers");
                     for _http_platform in 0..worker_config.http_workers {
-                        http_tx
+                        worker_rxs
+                            .http
                             .send(WorkerAction::StopProgram)
                             .map_err(|e| {
                                 anyhow!("Failed to send stop program to http workers: {:?}", e)
                             })
                             .await?;
                     }
-                    info!("Sending stop signal to browser workers");
-                    for _browser_platform in 0..worker_config.browser_workers {
-                        browser_tx
+                    info!("Sending stop signal to headless browser workers");
+                    for _browser_platform in 0..worker_config.headless_browser_workers {
+                        worker_rxs
+                            .headless_browser
+                            .send(WorkerAction::StopProgram)
+                            .map_err(|e| {
+                                anyhow!("Failed to send stop program to browser workers: {:?}", e)
+                            })
+                            .await?;
+                    }
+                    info!("Sending stop signal to headed browser workers");
+                    for _browser_platform in 0..worker_config.headed_browser_workers {
+                        worker_rxs
+                            .headed_browser
                             .send(WorkerAction::StopProgram)
                             .map_err(|e| {
                                 anyhow!("Failed to send stop program to browser workers: {:?}", e)
@@ -577,23 +611,23 @@ where
         target_circulation: i32,
         circulation: &mut i32,
         scheduler: &Arc<Mutex<S>>,
-        http_tx: &Sender<WorkerAction<P>>,
-        browser_tx: &Sender<WorkerAction<P>>,
+        worker_rxs: &ChannelGroup<Sender<WorkerAction<P>>, P>,
         monitor: &Sender<Event<P>>,
-        dequeue_job: &HashMap<P, Sender<WorkerAction<P>>>,
+        dequeue_job: &Vec<Sender<WorkerAction<P>>>,
     ) -> Result<()> {
         monitor
             .send(Event::BalanceCirculation(DequeueInfo::new(
                 *circulation,
                 scheduler.lock().await.size(),
-                http_tx.len(),
-                browser_tx.len(),
+                worker_rxs.http.len(),
+                worker_rxs.headless_browser.len(),
+                worker_rxs.headed_browser.len(),
                 quanta::Instant::now(),
             )))
             .await?;
         if *circulation < target_circulation {
             if let Some(job) = scheduler.lock().await.dequeue() {
-                let sender = dequeue_job.get(&job.platform).unwrap();
+                let sender = &dequeue_job[job.platform.to_repr()];
                 sender
                     .send(WorkerAction::Job(job))
                     .map_err(|e| anyhow!("Failed to send job to worker in dequeue loop: {:?}", e))

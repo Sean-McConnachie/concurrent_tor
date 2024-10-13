@@ -12,12 +12,12 @@ use serde::{Deserialize, Serialize};
 use std::{any::Any, sync::Arc};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct MyBrowserRequest {
+pub struct MyHeadedBrowserRequest {
     pub id: usize,
     pub url: String,
 }
 
-impl MyBrowserRequest {
+impl MyHeadedBrowserRequest {
     pub fn new(url: impl Into<String>) -> Self {
         Self {
             // Random id for the hash since the url is the same for all requests in this case.
@@ -32,7 +32,7 @@ impl MyBrowserRequest {
     }
 }
 
-impl WorkerRequest for MyBrowserRequest {
+impl WorkerRequest for MyHeadedBrowserRequest {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -46,21 +46,20 @@ impl WorkerRequest for MyBrowserRequest {
     }
 }
 
-pub struct MyBrowser {}
+pub struct MyHeadedBrowser {}
 
 #[async_trait]
-impl BrowserPlatform<Platform> for MyBrowser {
+impl BrowserPlatform<Platform> for MyHeadedBrowser {
     async fn process_job(
         &self,
         job: &Job<NotRequested, Platform>,
         tab: Arc<Tab>,
     ) -> Vec<QueueJob<Platform>> {
-        let req: &MyBrowserRequest = job.request.as_any().downcast_ref().unwrap();
+        let req: &MyHeadedBrowserRequest = job.request.as_any().downcast_ref().unwrap();
         info!("Processing browser request: {:?}", req);
         let url = req.url.clone();
         let handle = tokio::task::spawn_blocking(move || {
             tab.navigate_to(&url).unwrap();
-            tab.wait_until_navigated().unwrap();
             let ip = tab
                 .wait_for_element("#ipv4 > a:nth-child(1)")?
                 .get_inner_text()?;
@@ -81,20 +80,20 @@ impl BrowserPlatform<Platform> for MyBrowser {
     }
 }
 
-pub struct MyBrowserBuilder {}
+pub struct MyHeadedBrowserBuilder {}
 
-impl MyBrowserBuilder {
+impl MyHeadedBrowserBuilder {
     pub fn new() -> Self {
         Self {}
     }
 }
 
-impl BrowserPlatformBuilder<Platform> for MyBrowserBuilder {
+impl BrowserPlatformBuilder<Platform> for MyHeadedBrowserBuilder {
     fn platform(&self) -> Platform {
-        Platform::MyBrowser
+        Platform::MyHeadedBrowser
     }
 
     fn build(&self) -> Box<dyn BrowserPlatform<Platform>> {
-        Box::new(MyBrowser {})
+        Box::new(MyHeadedBrowser {})
     }
 }

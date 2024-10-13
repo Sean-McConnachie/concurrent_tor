@@ -17,8 +17,7 @@ use async_channel::{Receiver, Sender};
 use async_trait::async_trait;
 use headless_chrome::{Browser, FetcherOptions, LaunchOptions, Revision, Tab};
 use log::{debug, info};
-use std::time::Duration;
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::task::JoinHandle;
 
 pub trait BrowserPlatformBuilder<P: PlatformT>: Send {
@@ -32,7 +31,7 @@ pub trait BrowserPlatform<P: PlatformT>: Send {
     async fn process_job(&self, job: &Job<NotRequested, P>, tab: Arc<Tab>) -> Vec<QueueJob<P>>;
 }
 
-pub struct BrowserPlatformData {
+pub(crate) struct BrowserPlatformData {
     config: BrowserPlatformConfig,
     last_request: quanta::Instant,
     requests: u32,
@@ -71,7 +70,7 @@ impl PlatformHistory for BrowserPlatformData {
     }
 }
 
-pub struct BrowserWorker<P: PlatformT, C: Client, M: MainClient<C>> {
+pub(crate) struct BrowserWorker<P: PlatformT, C: Client, M: MainClient<C>> {
     worker_id: u16,
     /// Monitor to send events to
     monitor: Sender<Event<P>>,
@@ -91,8 +90,8 @@ pub struct BrowserWorker<P: PlatformT, C: Client, M: MainClient<C>> {
     platform_impls: HashMap<P, Box<dyn BrowserPlatform<P>>>,
     /// Proxy handle
     proxy_handle: JoinHandle<()>,
-    /// Browser handle
-    browser: Browser,
+    // /// Browser handle
+    // browser: Browser,
     #[allow(dead_code)]
     /// Headless mode
     headless: bool,
@@ -107,6 +106,25 @@ where
     C: Client,
     M: MainClient<C>,
 {
+    fn build_browser_opts<'a>(socks_addr: &'a str, worker_id: u16, headless: bool) -> LaunchOptions<'a> {
+        const DEBUG_START_PORT: u16 = 4444;
+        let headless_str = if headless { "headless" } else { "headed" };
+        info!("Creating {} browser worker", headless_str);
+        let mut browser_opts = LaunchOptions::default_builder();
+        browser_opts.port(Some(DEBUG_START_PORT + worker_id));
+        if M::use_proxy() {
+            browser_opts.proxy_server(Some(&socks_addr));
+        }
+        browser_opts
+            .fetcher_options(
+                FetcherOptions::default().with_revision(Revision::Specific("1367994".into())),
+            )
+            .idle_browser_timeout(Duration::from_secs(u64::MAX))
+            .headless(headless)
+            .build()
+            .expect("Failed to find chrome executable")
+    }
+
     pub fn new(
         worker_id: u16,
         monitor: Sender<Event<P>>,
@@ -120,20 +138,9 @@ where
         headless: bool,
         port: u16,
     ) -> Result<Self> {
-        info!("Creating browser worker {}", worker_id);
-        let socks_addr = Self::format_socks_proxy_addr(port);
-        let mut browser_opts = LaunchOptions::default_builder();
-        if M::use_proxy() {
-            browser_opts.proxy_server(Some(&socks_addr));
-        }
+        let headless_str = if headless { "headless" } else { "headed" };
+        info!("Creating {} browser worker {}", headless_str, worker_id);
         let proxy_handle = Self::start_proxy_handle(worker_id, &main_client, port);
-        let browser_opts = browser_opts
-            .fetcher_options(FetcherOptions::default().with_revision(Revision::Latest))
-            .idle_browser_timeout(Duration::from_secs(u64::MAX))
-            .headless(false)
-            .build()
-            .expect("Failed to find chrome executable");
-        let browser = Browser::new(browser_opts)?;
         Ok(BrowserWorker {
             worker_id,
             monitor,
@@ -145,7 +152,7 @@ where
             main_client,
             platform_data,
             platform_impls,
-            browser,
+            // browser,
             headless,
             port,
             _client: std::marker::PhantomData,
@@ -157,7 +164,7 @@ where
     }
 
     fn start_proxy_handle(worker_id: u16, main_client: &M, port: u16) -> JoinHandle<()> {
-        debug!("Starting proxy for browser worker {}", worker_id);
+        info!("Starting proxy for browser worker {}", worker_id);
         if M::use_proxy() {
             let client = main_client.isolated_client();
             client
@@ -203,14 +210,13 @@ where
                     self = self.renew_client()?;
                 }
                 WorkerLogicAction::ProcessJob((ts_start, job)) => {
-                    let tab = self.browser.new_tab()?;
-                    let jobs = self
-                        .platform_impls
-                        .get(&job.platform)
-                        .unwrap()
-                        .process_job(&job, tab.clone())
-                        .await;
-                    tokio::task::spawn_blocking(move || match tab.close(false) {
+                    let socks_addr = Self::format_socks_proxy_addr(self.port);
+                    let browser_opts = Self::build_browser_opts(&socks_addr, self.worker_id, self.headless);
+                    let browser = Browser::new(browser_opts)?;
+                    let tab = browser.new_tab()?;
+                    let platform_impl = self.platform_impls.get(&job.platform).unwrap();
+                    let jobs = platform_impl.process_job(&job, tab.clone()).await;
+                    tokio::task::spawn_blocking(move || match { tab.close(false) } {
                         Ok(_) => {}
                         Err(e) => {
                             debug!("Failed to close tab: {:?}. Already closed?", e);

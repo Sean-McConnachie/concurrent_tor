@@ -6,13 +6,22 @@ use std::{collections::HashMap, hash::Hash};
 pub struct WorkerConfig {
     pub target_circulation: u32,
     pub http_workers: u16,
-    // pub browser_workers: u32,
-    pub browser_workers: u16,
+    pub headless_browser_workers: u16,
+    pub headed_browser_workers: u16,
 }
 
 /// Configuration for every platform
 #[derive(Deserialize, Clone, Debug)]
 pub struct HttpPlatformConfig {
+    /// Maximum number of requests per IP
+    pub max_requests: u32,
+    /// Rate limiting in seconds
+    pub timeout_ms: u32,
+}
+
+/// Configuration for the headless browser platform
+#[derive(Deserialize, Clone, Debug)]
+pub struct HeadlessBrowserPlatformConfig {
     /// Maximum number of requests per IP
     pub max_requests: u32,
     /// Rate limiting in seconds
@@ -26,6 +35,8 @@ pub struct BrowserPlatformConfig {
     pub max_requests: u32,
     /// Rate limiting in seconds
     pub timeout_ms: u32,
+    /// Headless browser configuration
+    pub headless: bool,
 }
 
 #[derive(Deserialize, Debug)]

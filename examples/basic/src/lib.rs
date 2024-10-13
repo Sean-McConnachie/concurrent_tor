@@ -1,14 +1,15 @@
-pub mod browser;
 pub mod cron;
+pub mod headed_browser;
+pub mod headless_browser;
 pub mod http;
 pub mod monitor;
 
 use concurrent_tor::{
     execution::scheduler::{PlatformT, WorkerRequest},
-    exports::StrumFromRepr,
     Result,
 };
 use serde::{Deserialize, Serialize};
+use strum::{EnumIter, FromRepr};
 
 #[cfg(feature = "use_tor_backend")]
 pub mod backend {
@@ -41,17 +42,21 @@ pub mod backend {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, Hash, Eq, PartialEq, StrumFromRepr)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Hash, Eq, PartialEq, FromRepr, EnumIter)]
 pub enum Platform {
     MyHttp,
-    MyBrowser,
+    MyHeadlessBrowser,
+    MyHeadedBrowser,
 }
 
 impl PlatformT for Platform {
     fn request_from_json(&self, json: &str) -> Result<Box<dyn WorkerRequest>> {
         match self {
             Platform::MyHttp => http::MyHttpRequest::from_json(json),
-            Platform::MyBrowser => browser::MyBrowserRequest::from_json(json),
+            Platform::MyHeadlessBrowser => {
+                headless_browser::MyHeadlessBrowserRequest::from_json(json)
+            }
+            Platform::MyHeadedBrowser => headed_browser::MyHeadedBrowserRequest::from_json(json),
         }
     }
 

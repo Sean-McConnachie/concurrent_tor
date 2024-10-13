@@ -18,6 +18,5 @@ pub mod exports {
     pub use murmur3::murmur3_x64_128;
     pub use serde::{Deserialize, Serialize};
     pub use serde_json::{from_str as json_from_str, to_string as json_to_string};
-    pub use strum::FromRepr as StrumFromRepr;
     pub use tor_rtcompat::PreferredRuntime as TorRuntime;
 }

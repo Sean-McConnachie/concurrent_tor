@@ -1,7 +1,8 @@
 [workers]
 target_circulation = 10
 http_workers = 1
-browser_workers = 1
+headless_browser_workers = 1
+headed_browser_workers = 1
 
 [http_platforms]
 
@@ -11,7 +12,12 @@ timeout_ms = 500
 
 [browser_platforms]
 
-[browser_platforms.MyBrowser]
+[browser_platforms.MyHeadedBrowser]
+max_requests = 10
+timeout_ms = 500
+headless = false
+
+[browser_platforms.MyHeadlessBrowser]
 max_requests = 10
 timeout_ms = 500
 headless = true

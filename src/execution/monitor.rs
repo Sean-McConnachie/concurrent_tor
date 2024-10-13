@@ -108,7 +108,8 @@ pub struct DequeueInfo {
     pub current_circulation: i32,
     pub scheduler_len: usize,
     pub http_chan_len: usize,
-    pub browser_chan_len: usize,
+    pub headless_browser_chan_len: usize,
+    pub headed_browser_chan_len: usize,
     pub ts: quanta::Instant,
 }
 
@@ -117,14 +118,16 @@ impl DequeueInfo {
         current_circulation: i32,
         scheduler_len: usize,
         http_chan_len: usize,
-        browser_chan_len: usize,
+        headless_browser_chan_len: usize,
+        headed_browser_chan_len: usize,
         ts: quanta::Instant,
     ) -> Self {
         DequeueInfo {
             current_circulation,
             scheduler_len,
             http_chan_len,
-            browser_chan_len,
+            headless_browser_chan_len,
+            headed_browser_chan_len,
             ts,
         }
     }

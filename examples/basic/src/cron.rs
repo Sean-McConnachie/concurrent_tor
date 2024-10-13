@@ -1,4 +1,7 @@
-use crate::{browser::MyBrowserRequest, http::MyHttpRequest, Platform};
+use crate::{
+    headed_browser::MyHeadedBrowserRequest, headless_browser::MyHeadlessBrowserRequest,
+    http::MyHttpRequest, Platform,
+};
 use concurrent_tor::{
     execution::{
         cron::{CronPlatform, CronPlatformBuilder},
@@ -26,10 +29,19 @@ impl Cron {
         (hash, Job::init_from_box(Platform::MyHttp, req, 3))
     }
 
-    fn build_browser_job() -> (JobHash, Job<NotRequested, Platform>) {
-        let req = MyBrowserRequest::new("https://whatismyipaddress.com/");
+    fn build_headed_browser_job() -> (JobHash, Job<NotRequested, Platform>) {
+        let req = MyHeadedBrowserRequest::new("https://whatismyipaddress.com/");
         let hash = req.hash().expect("Unable to hash");
-        (hash, Job::init(Platform::MyBrowser, Box::new(req), 3))
+        (hash, Job::init(Platform::MyHeadedBrowser, Box::new(req), 3))
+    }
+
+    fn build_headless_browser_job() -> (JobHash, Job<NotRequested, Platform>) {
+        let req = MyHeadlessBrowserRequest::new("https://api.ipify.org/");
+        let hash = req.hash().expect("Unable to hash");
+        (
+            hash,
+            Job::init(Platform::MyHeadlessBrowser, Box::new(req), 3),
+        )
     }
 }
 
@@ -48,8 +60,12 @@ impl CronPlatform<Platform> for Cron {
                     Self::build_http_job()
                 },
                 move || {
-                    info!("Sending browser job.");
-                    Self::build_browser_job()
+                    info!("Sending headed browser job.");
+                    Self::build_headed_browser_job()
+                },
+                move || {
+                    info!("Sending headless browser job.");
+                    Self::build_headless_browser_job()
                 },
             ]
             .iter()

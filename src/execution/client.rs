@@ -263,13 +263,13 @@ impl MainClient<CStandardClient> for MainCStandardClient {
 
 pub type StartInstant = quanta::Instant;
 
-pub enum WorkerLogicAction<P: PlatformT> {
+pub(crate) enum WorkerLogicAction<P: PlatformT> {
     RenewClient,
     Nothing,
     ProcessJob((StartInstant, Job<NotRequested, P>)),
 }
 
-pub async fn worker_job_logic_start<P, D>(
+pub(crate) async fn worker_job_logic_start<P, D>(
     worker_id: u16,
     job: Job<NotRequested, P>,
     platforms: &mut HashMap<P, D>,
@@ -346,7 +346,7 @@ where
     Ok(WorkerLogicAction::Nothing)
 }
 
-pub async fn worker_job_logic_process<P, D>(
+pub(crate) async fn worker_job_logic_process<P, D>(
     ts_start: StartInstant,
     worker_id: u16,
     worker_type: WorkerType,

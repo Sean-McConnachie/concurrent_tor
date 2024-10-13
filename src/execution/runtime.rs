@@ -7,12 +7,15 @@ use crate::{
         cron::CronPlatformBuilder,
         http::{HttpPlatformBuilder, HttpPlatformData, HttpWorker},
         monitor::{Event, Monitor},
-        scheduler::{JobDistributor, PlatformT, QueueJob, QueueJobStatus, Scheduler, WorkerAction},
+        scheduler::{
+            ChannelGroup, JobDistributor, PlatformT, QueueJob, QueueJobStatus, Scheduler,
+            SpecificWorkerType, WorkerAction,
+        },
     },
     Result,
 };
 use anyhow::anyhow;
-use async_channel::{unbounded, Sender};
+use async_channel::{unbounded, Receiver, Sender};
 use futures_util::TryFutureExt;
 use log::info;
 use std::{
@@ -55,36 +58,89 @@ where
         browser_platform_configs: HashMap<P, BrowserPlatformConfig>,
         browser_platforms: Vec<Box<dyn BrowserPlatformBuilder<P>>>,
     ) -> Result<Self> {
+        let n_platforms = {
+            let mut n = 0;
+            for (i, var) in P::iter().enumerate() {
+                debug_assert!(
+                    var.to_repr() == i,
+                    "Enum `to_repr` must increase sequentially from 0. The best solution is to use \
+                    `*self as usize` in the `to_repr` function."
+                );
+                n += 1;
+            }
+            n
+        };
+        debug_assert!(n_platforms > 0, "No platforms found");
+
         let pool = connect_and_init_db().await?;
 
         let (monitor_tx, monitor_rx) = unbounded::<Event<P>>();
         let (request_job_tx, request_job_rx) = unbounded::<QueueJobStatus>();
         let (queue_job_tx, queue_job_rx) = unbounded::<QueueJob<P>>();
 
-        let (http_worker_tx, http_worker_rx) = unbounded::<WorkerAction<P>>();
-        let (browser_worker_tx, browser_worker_rx) = unbounded::<WorkerAction<P>>();
+        let (http_wrkr_tx, http_wrkr_rx) = unbounded::<WorkerAction<P>>();
+        let (hl_brsr_wrkr_tx, hl_brsr_wrkr_rx) = unbounded::<WorkerAction<P>>();
+        let (hd_brsr_wrkr_tx, hd_brsr_wrkr_rx) = unbounded::<WorkerAction<P>>();
+
+        let worker_rxs = ChannelGroup::<Sender<WorkerAction<P>>, P> {
+            http: http_wrkr_tx.clone(),
+            headless_browser: hl_brsr_wrkr_tx.clone(),
+            headed_browser: hd_brsr_wrkr_tx.clone(),
+            _platform: std::marker::PhantomData,
+        };
+
+        let worker_txs = {
+            let mut platform_to_worker_type = HashMap::new();
+            for http in http_platforms.iter() {
+                platform_to_worker_type.insert(http.platform(), SpecificWorkerType::Http);
+            }
+            for (platform, browser) in browser_platform_configs.iter() {
+                platform_to_worker_type.insert(
+                    *platform,
+                    if browser.headless {
+                        SpecificWorkerType::HeadlessBrowser
+                    } else {
+                        SpecificWorkerType::HeadedBrowser
+                    },
+                );
+            }
+
+            let mut worker_channels = vec![None; n_platforms];
+            for (i, var) in P::iter().enumerate() {
+                worker_channels[i] = Some(match platform_to_worker_type.get(&var).unwrap() {
+                    SpecificWorkerType::Http => {
+                        println!("http_wrkr_tx: {}", i);
+                        http_wrkr_tx.clone()
+                    }
+                    SpecificWorkerType::HeadlessBrowser => {
+                        println!("hl_brsr_wrkr_tx: {}", i);
+                        hl_brsr_wrkr_tx.clone()
+                    }
+                    SpecificWorkerType::HeadedBrowser => {
+                        println!("hd_brsr_wrkr_tx: {}", i);
+                        hd_brsr_wrkr_tx.clone()
+                    }
+                });
+            }
+            worker_channels
+                .into_iter()
+                .map(|x| x.unwrap())
+                .collect::<Vec<_>>()
+        };
 
         // Start monitor
         let monitor_handle = tokio::task::spawn(monitor.start(monitor_rx));
 
         // Build JobDistributor
         let job_distributor = {
-            let mut txs = HashMap::new();
-            for http_platform in http_platforms.iter() {
-                txs.insert(http_platform.platform(), http_worker_tx.clone());
-            }
-            for browser_platform in browser_platforms.iter() {
-                txs.insert(browser_platform.platform(), browser_worker_tx.clone());
-            }
             JobDistributor::new(
                 monitor_tx.clone(),
                 pool,
                 request_job_rx,
                 request_job_tx.clone(),
                 queue_job_rx,
-                txs,
-                http_worker_tx.clone(),
-                browser_worker_tx.clone(),
+                worker_txs,
+                worker_rxs,
                 scheduler,
                 worker_config.clone(),
             )
@@ -127,8 +183,8 @@ where
                     worker_id,
                     monitor_tx.clone(),
                     request_job_tx.clone(),
-                    http_worker_rx.clone(),
-                    http_worker_tx.clone(),
+                    http_wrkr_rx.clone(),
+                    http_wrkr_tx.clone(),
                     queue_job_tx.clone(),
                     main_client.clone(),
                     platform_data,
@@ -139,9 +195,8 @@ where
 
         // Build Browser workers
         const STARTING_PORT: u16 = 9050;
-        let browser_workers: Vec<BrowserWorker<P, C, M>> = (worker_config.http_workers
-            ..worker_config.http_workers + worker_config.browser_workers)
-            .map(|worker_id| {
+        let build_browser_worker =
+            |worker_id, headless, rx: Receiver<WorkerAction<P>>, tx: Sender<WorkerAction<P>>| {
                 let platform_data = browser_platforms
                     .iter()
                     .map(|builder| {
@@ -161,23 +216,47 @@ where
                         (platform.clone(), builder.build())
                     })
                     .collect::<HashMap<_, _>>();
-                let socks_port = STARTING_PORT + worker_id as u16;
+                let socks_port = STARTING_PORT + worker_id;
                 BrowserWorker::new(
                     worker_id,
                     monitor_tx.clone(),
                     request_job_tx.clone(),
-                    browser_worker_rx.clone(),
-                    browser_worker_tx.clone(),
+                    rx.clone(),
+                    tx.clone(),
                     queue_job_tx.clone(),
                     main_client.clone(),
                     platform_data,
                     platform_impls,
-                    true, // TODO: Make this configurable
+                    headless,
                     socks_port,
                 )
                 .unwrap()
+            };
+        let (n_http, n_hd_brsr, n_hl_brsr) = (
+            worker_config.http_workers,
+            worker_config.headed_browser_workers,
+            worker_config.headless_browser_workers,
+        );
+        let browser_workers = (0..n_hl_brsr)
+            .map(|i| {
+                // Start headless browser workers first
+                build_browser_worker(
+                    n_http + n_hl_brsr + i,
+                    true,
+                    hl_brsr_wrkr_rx.clone(),
+                    hl_brsr_wrkr_tx.clone(),
+                )
             })
-            .collect();
+            .chain((0..n_hd_brsr).map(|i| {
+                // Then start headed browser workers
+                build_browser_worker(
+                    n_http + n_hl_brsr + n_hd_brsr + i,
+                    false,
+                    hd_brsr_wrkr_rx.clone(),
+                    hd_brsr_wrkr_tx.clone(),
+                )
+            }))
+            .collect::<Vec<_>>();
 
         const QUEUE_WORKERS: usize = 2;
         let mut handles = Vec::with_capacity(http_workers.len() + QUEUE_WORKERS);

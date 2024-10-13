@@ -840,7 +840,7 @@ async fn my_main(
         workers: WorkerConfig {
             target_circulation: ((http_workers + browser_workers) * 2) as u32,
             http_workers,
-            browser_workers,
+            headless_browser_workers: browser_workers,
         },
         http_platforms: hashmap!(
             Platform::MyHttp => HttpPlatformConfig {

@@ -43,7 +43,7 @@ pub struct HttpJobResponse<P: PlatformT> {
     pub body: Result<HttpResponse>,
 }
 
-pub struct HttpPlatformData {
+pub(crate) struct HttpPlatformData {
     config: HttpPlatformConfig,
     last_request: quanta::Instant,
     requests: u32,
@@ -82,7 +82,7 @@ impl PlatformHistory for HttpPlatformData {
     }
 }
 
-pub struct HttpWorker<P: PlatformT, C: Client, M: MainClient<C>> {
+pub(crate) struct HttpWorker<P: PlatformT, C: Client, M: MainClient<C>> {
     worker_id: u16,
     /// Monitor to send events to
     monitor: Sender<Event<P>>,
