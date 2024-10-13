@@ -1,1 +1,3 @@
 /target
+/.idea
+concurrent_tor.sqlite3

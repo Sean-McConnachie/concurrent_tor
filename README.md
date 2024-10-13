@@ -1,114 +1,68 @@
-# Concurrent tor
+# Concurrent Tor
 
-#### A library designed to run multiple tor instances concurrently.
+### A comprehensive scraping runtime.
 
-#### User defined task-dispatcher allows for different queue designs, i.e. priority queue, binary heap etc...
+## Features
+- Multiple Tor clients
+- Persistent job store across restarts
+- Concurrent requests
+- Supported request types (all in the same runtime):
+  - HTTP
+  - Headless browser
+  - Headed browser
+- Custom job scheduling
+- Event monitoring
+- Request timeouts
+- Client renewals (new IP) on max requests
+- Configurable by config file
 
-See `/examples/basic.rs` for the boilerplate code to use this library.
+## [See an Example](examples/basic)
 
-### Task
-Your implementation of a task. This library uses enum_delegate [enum_delegate](https://crates.io/crates/enum_delegate)
-to allow for polymorphism. There is a `request::Task` trait which must be implemented. In addition to this, more traits
-can be added to allow for more functionality. For example:
-
-**Note:** If you are defining your own trait (such as `MyExt` in the following example), add 
-`enum_delegate = { package = "temporary_enum_delegate_0_3_0" }`.
-
-```rust
-#[delegate]  // <-- Additional traits must be annotated with `#[delegate]`
-pub trait MyExt {
-    fn get_priority(&self) -> usize;
-}
-
-#[delegate(derive(Task, MyExt))]  // <-- Task enum must implement `Task`
-pub enum ExampleTaskEnum {
-    TaskOne(ExampleTaskOne),
-    // TaskTwo(ExampleTaskTwo),
-}
-
-#[derive(Debug, Default)]
-pub struct ExampleTaskOne {
-    priority: usize,
-    request: request::Request,
-}
-
-impl ExampleTaskOne {
-    fn new(priority: usize, request: request::Request) -> ExampleTaskOne {
-        ExampleTaskOne { priority, request }
-    }
-}
-
-#[async_trait]
-impl Task for ExampleTaskOne {
-    // The request can either be generated on each call of this function, or it can be stored in the
-    // struct. The advantage of storing in the struct is that, if a retry is necessary, the original
-    // Task object can be reused. Storing the request in the struct means errors (i.e. uri parsing)
-    // can be handled elsewhere.
-    fn get_request(&mut self) -> &mut request::Request {
-        &mut self.request
-    }
-
-    async fn request_completed(
-        &mut self,
-        response: errors::RequestResult,
-    ) -> Result<(), anyhow::Error> {
-        println!("{:?}", self.request.get_next_attempt());
-        println!("{:?}", response?.body_bytes().await?);
-        // logic to decide if the task was successful (i.e. insert to a database)
-
-        // or if it failed due to a network error (i.e. check self.can_try() == true, if no, maybe
-        // you want to increase max_tries, self.next_attempt = request::RequestResult::Retry)
-
-        // or if the page is no longer online (i.e. self.can_try() == true ... ,
-        // self.next_attempt = request::RequestResult::AttemptWebArchive)
-        self.request.next_attempt(request::RequestType::WebArchive);
-        Ok(())
-    }
-}
+```bash
+# Try it out!
+git clone https://github.com/Sean-McConnachie/concurrent_tor.git
+cd concurrent_tor/examples/basic
+cargo run --release --features use_tor_backend
 ```
 
-### Task dispatcher
-Your implementation of a queue/basic dispatcher.
-```rust
-pub struct ExampleTaskDispatcher<T> {
-    tasks: Arc<Mutex<Vec<T>>>,
-}
+## Architecture
+![Architecture](images/architecture.png)
 
-impl<T> ExampleTaskDispatcher<T>
-where
-    T: Task + MyExt,
-{
-    fn new() -> ExampleTaskDispatcher<T> {
-        let tasks = arc!(Mutex::new(vec![]));
-        ExampleTaskDispatcher { tasks }
-    }
-}
+## Things to watch out for
+- Check the example if you are unsure about how to organise your code.
+- Ensure your `hash`ing function for a request type is replicable if you want to prevent duplicate requests.
+- Ensure you use the correct flags for all of your request types.
+  - In `process_job(...)` you need to use `job.request.as_any().downcast_ref().unwrap();`
+  - This will crash if you don't receive the correct request type due to setting the platform wrong somewhere else!
+- You must return the job passed by reference in `process_job(...)`.
+  - Use `QueueJob::Completed(job.into())` or another variant.
+  - The program will rightfully panic if you don't return the job.
+- The `target_circulation` will determine how many jobs to pass to the de-queuer.
+  - This must be greater than the number of workers.
+  - Preferably keep a slight excess so there are some jobs in the queue, and you don't need to wait for a round trip.
+- Ensure your `Monitor` implementation receives every event.
+  - Ensure you check the `AtomicBool` flagged passed to your monitor on each iteration (see example).
+  - Or use the provided `EmptyMonitor` if you don't care about events.
+- Do not send jobs for any of the http workers, headed browser workers, or headless browser workers if you do not have
+at least one active one. This will cause a panic due to no there being no receiving channels!
+- The HTTP backend relies on [hyper](https://crates.io/crates/hyper) and it is relatively low-level.
+- If you find any, or want to report bugs, please let me know through a [Github issue](https://github.com/Sean-McConnachie/concurrent_tor/issues) :)
 
-impl<T> dispatcher::Dispatcher<T> for ExampleTaskDispatcher<T>
-where
-    T: Task + MyExt,
-{
-    fn get_task(&self) -> Option<T> {
-        let mut guard = self.tasks.lock().unwrap();
-        let rtn_value = guard.pop();
-        rtn_value
-    }
+##  [geckodriver](https://github.com/mozilla/geckodriver/releases)
 
-    fn add_task(&self, task: T) {
-        let mut guard = self.tasks.lock().unwrap();
-        dbg!(task.get_priority());
-        guard.push(task);
-    }
-}
-```
+If you want to use the browser, you'll need to provide path to your local [geckodriver](https://github.com/mozilla/geckodriver/releases)
 
-### Request
-Stores a request's:
- - `Uri`
- - `Headers`
- - `Method`
- - `Allow redirect`
- - `Maximum tries`
- - `Next attempt` -> `Standard`/`WebArchive`/`Ignore`
+## Tests
+There is currently a [single test](tests/architecture.rs).
+- It uses the non-tor client (i.e. [reqwest](https://crates.io/crates/reqwest))
+- Spawns an [actix web server](https://github.com/actix/actix-web)
+- Organises events from:
+  - Concurrent Tor backend using a custom monitor
+  - The web server
+  - The user implementations
+- Sorts all events by time
+- Ensures the order of execution is correct (since this is essentially a state machine)
+- Ensures clients actually get renewed
 
-Along with some basic logic/functions.
+It's pretty beefy, so good luck if you read through it!
+
