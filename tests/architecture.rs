@@ -5,7 +5,6 @@ use concurrent_tor::{
         runtime::CTRuntime,
         scheduler::{PlatformT, SimpleScheduler, WorkerRequest},
     },
-    exports::StrumFromRepr,
     *,
 };
 use local_client::*;
@@ -15,6 +14,7 @@ use std::{
     path::PathBuf,
     sync::{atomic::AtomicUsize, Arc},
 };
+use strum_macros::{EnumIter, FromRepr};
 
 const SERVER_ADDR: (&str, u16) = ("127.0.0.1", 8080);
 const SERVER_WORKERS: usize = 4;
@@ -66,7 +66,7 @@ mod tor_client {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, Hash, Eq, PartialEq, StrumFromRepr)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Hash, Eq, PartialEq, FromRepr, EnumIter)]
 pub enum Platform {
     MyHttp,
     MyBrowser,
@@ -389,7 +389,7 @@ mod browser {
         Result,
     };
     use serde::{Deserialize, Serialize};
-    use std::{any::Any, sync::Arc};
+    use std::{any::Any, };
 
     #[derive(Serialize, Deserialize, Debug, Clone)]
     pub struct MyBrowserRequest {
@@ -439,19 +439,13 @@ mod browser {
         async fn process_job(
             &self,
             job: &Job<NotRequested, Platform>,
-            tab: Arc<headless_chrome::Tab>,
+            client: &fantoccini::Client,
         ) -> Vec<QueueJob<Platform>> {
             let req: &MyBrowserRequest = job.request.as_any().downcast_ref().unwrap();
-            // println!("IpBrowser job response: {:?}", job);
-            let url = req.url.clone();
-            let url = format!("{}{}", url, req.hash().unwrap());
-            let handle = tokio::task::spawn_blocking(move || {
-                tab.navigate_to(&url).unwrap();
-                tab.wait_until_navigated().unwrap();
-                let resp = tab.get_content().unwrap();
-                resp
-            });
-            let r = handle.await.unwrap();
+            let url = format!("{}{}", req.url, req.hash().unwrap());
+            client.goto(&url).await.unwrap();
+            let r = client.source().await.unwrap();
+
             let completed: Job<Requested, Platform> = job.into();
             let q_job = if r.contains(SUCCESS_MESSAGE) {
                 self.events
@@ -789,7 +783,8 @@ mod server {
 #[derive(Debug, Copy, Clone)]
 struct ExecutionConfig {
     http_workers: u16,
-    browser_workers: u16,
+    headed_browser_workers: u16,
+    headless_browser_workers: u16,
     send_req_timeout_ms: u64,
     max_requests: u32,
     timeout_ms: u32,
@@ -811,14 +806,16 @@ async fn my_main(
 
     let (
         http_workers,
-        browser_workers,
+        headed_browser_workers,
+        headless_browser_workers,
         send_req_timeout_ms,
         max_requests,
         timeout_ms,
         shutdown_after_s,
     ) = (
         execution_config.http_workers,
-        execution_config.browser_workers,
+        execution_config.headed_browser_workers,
+        execution_config.headless_browser_workers,
         execution_config.send_req_timeout_ms,
         execution_config.max_requests,
         execution_config.timeout_ms,
@@ -838,9 +835,14 @@ async fn my_main(
 
     let ct_config = ScraperConfig {
         workers: WorkerConfig {
-            target_circulation: ((http_workers + browser_workers) * 2) as u32,
+            target_circulation: ((http_workers + headed_browser_workers + headless_browser_workers)
+                * 2) as u32,
             http_workers,
-            headless_browser_workers: browser_workers,
+            headless_browser_workers,
+            headed_browser_workers,
+            driver_fp: std::env::var("DRIVER_FP").expect("`DRIVER_FP` for geckodriver not set!"),
+            socks_start_port: 9050,
+            driver_start_port: 4444,
         },
         http_platforms: hashmap!(
             Platform::MyHttp => HttpPlatformConfig {
@@ -852,19 +854,9 @@ async fn my_main(
             Platform::MyBrowser => BrowserPlatformConfig {
                 max_requests,
                 timeout_ms,
+                headless: true
             }
         ),
-    };
-
-    let use_http = if !disable_cron {
-        http_workers > 0
-    } else {
-        false
-    };
-    let use_browser = if !disable_cron {
-        browser_workers > 0
-    } else {
-        false
     };
 
     let monitor = monitor::MyMonitor::new(server_events_rx, implementation_rx);
@@ -877,8 +869,8 @@ async fn my_main(
         vec![cron_box(cron::MyCronBuilder::new(
             job_count.clone(),
             send_req_timeout_ms,
-            use_http,
-            use_browser,
+            (http_workers > 0) && !disable_cron,
+            (headed_browser_workers + headless_browser_workers) > 0 && !disable_cron,
             implementation_tx.clone(),
         ))],
         ct_config.http_platforms,
@@ -925,6 +917,7 @@ mod tests {
     use concurrent_tor::{execution::monitor::Event, quanta_zero};
     use log::info;
     use std::{collections::HashMap, sync::atomic::Ordering};
+    use std::process::Command;
 
     #[allow(dead_code)]
     #[derive(Debug)]
@@ -1386,6 +1379,15 @@ mod tests {
     fn runtime_tests() {
         dotenv::dotenv().ok();
         tracing_subscriber::fmt::init();
+
+        let kill_gecko = move || {
+            let _ = Command::new("kill")
+                .arg("-9")
+                .arg("geckodriver")
+                .output()
+                .expect("Failed to kill geckodriver");
+        };
+
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(4)
             .enable_all()
@@ -1394,14 +1396,16 @@ mod tests {
 
         use super::*;
         let mut execution_config = ExecutionConfig {
-            http_workers: 1,
-            browser_workers: 1,
+            http_workers: 0,
+            headed_browser_workers: 0,
+            headless_browser_workers: 1,
             send_req_timeout_ms: 100,
             timeout_ms: 300,
             max_requests: 3,
             shutdown_after_s: 10,
         };
         let total_job_cnt = Arc::new(AtomicUsize::new(0));
+        kill_gecko();
         let (ts_end, events) = {
             let _guard = rt.enter();
             let handle = rt.block_on(async {
@@ -1423,6 +1427,7 @@ mod tests {
         assert_eq!(job_counts.len(), total_job_cnt.load(Ordering::Relaxed));
 
         execution_config.shutdown_after_s = 30;
+        kill_gecko();
         let (ts_end2, events2) = {
             let _guard = rt.enter();
             let handle = rt.block_on(async {

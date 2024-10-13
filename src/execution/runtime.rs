@@ -12,7 +12,7 @@ use crate::{
             SpecificWorkerType, WorkerAction,
         },
     },
-    Result,
+    Error, Result,
 };
 use anyhow::anyhow;
 use async_channel::{unbounded, Receiver, Sender};
@@ -20,6 +20,7 @@ use futures_util::TryFutureExt;
 use log::info;
 use std::{
     collections::HashMap,
+    fs,
     future::Future,
     pin::Pin,
     sync::{atomic::AtomicBool, Arc},
@@ -58,6 +59,14 @@ where
         browser_platform_configs: HashMap<P, BrowserPlatformConfig>,
         browser_platforms: Vec<Box<dyn BrowserPlatformBuilder<P>>>,
     ) -> Result<Self> {
+        if !fs::exists(&worker_config.driver_fp)? {
+            return Err(Error::from(anyhow!(
+                "Driver not found at path: {}. Please download geckodriver from \
+                `https://github.com/mozilla/geckodriver/releases`.",
+                worker_config.driver_fp
+            )));
+        }
+
         let n_platforms = {
             let mut n = 0;
             for (i, var) in P::iter().enumerate() {

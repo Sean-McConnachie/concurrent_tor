@@ -16,7 +16,7 @@ use crate::{
 use async_channel::{Receiver, Sender};
 use async_trait::async_trait;
 use hyper::StatusCode;
-use log::{debug, error, info};
+use log::{debug, info};
 use std::collections::HashMap;
 
 pub trait HttpPlatformBuilder<P: PlatformT, C: Client>: Send {
@@ -160,7 +160,7 @@ where
                 &self.monitor,
                 &self.requeue_job,
             )
-                .await?
+            .await?
             {
                 WorkerLogicAction::Nothing => {}
                 WorkerLogicAction::RenewClient => {
@@ -184,7 +184,7 @@ where
                         &self.queue_job,
                         &self.request_job,
                     )
-                        .await?;
+                    .await?;
                 }
             }
         }
@@ -196,7 +196,7 @@ where
         let worker_id = self.worker_id;
         match self.run_loop().await {
             Ok(_) => info!("Finished http worker {}", worker_id),
-            Err(e) => error!("Failed in http worker {}: {:?}", worker_id, e),
+            Err(e) => panic!("Failed in http worker {}: {:?}", worker_id, e),
         }
         info!("Stopping http worker {}", worker_id);
         Ok(())

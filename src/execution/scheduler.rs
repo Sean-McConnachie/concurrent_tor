@@ -286,7 +286,7 @@ where
             .await
             {
                 Ok(_) => info!("Enqueue loop stopped"),
-                Err(e) => error!("Enqueue loop stopped with error: {:?}", e),
+                Err(e) => panic!("Enqueue loop stopped with error: {:?}", e),
             }
             Ok(())
         });
@@ -302,7 +302,7 @@ where
             .await
             {
                 Ok(_) => info!("Dequeue loop stopped"),
-                Err(e) => error!("Dequeue loop stopped with error: {:?}", e),
+                Err(e) => panic!("Dequeue loop stopped with error: {:?}", e),
             }
             Ok(())
         });
