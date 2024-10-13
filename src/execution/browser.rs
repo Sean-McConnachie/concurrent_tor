@@ -16,7 +16,7 @@ use crate::{
 use async_channel::{Receiver, Sender};
 use async_trait::async_trait;
 use fantoccini::wd::Capabilities;
-use log::{debug, info};
+use log::{debug, error, info};
 use serde::Serialize;
 use std::{collections::HashMap, process::Stdio};
 use tokio::{
@@ -255,7 +255,7 @@ where
             Self::start_proxy_handle(self.worker_id, &self.main_client, self.socks_port);
         let driver_handle =
             Self::start_driver_handle(self.worker_id, &self.driver_fp, self.driver_port);
-        let browser = Self::connect_browser(&self.firefox_opts, self.socks_port).await?;
+        let browser = Self::connect_browser(&self.firefox_opts, self.driver_port).await?;
         Ok(BrowserWorker {
             proxy_handle,
             driver_handle,
@@ -264,8 +264,7 @@ where
         })
     }
 
-    pub(crate) async fn start(mut self) -> Result<()> {
-        info!("Starting browser worker {}", self.worker_id);
+    async fn run_loop(mut self) -> Result<()> {
         loop {
             let action = self.recv_job.recv().await?;
             let job = match action {
@@ -307,7 +306,21 @@ where
                 }
             }
         }
-        info!("Stopping browser worker {}", self.worker_id);
+        Ok(())
+    }
+
+    pub(crate) async fn start(self) -> Result<()> {
+        info!("Starting browser worker {}", self.worker_id);
+        let worker_id = self.worker_id;
+        match self.run_loop().await {
+            Ok(_) => {
+                info!("Finished browser worker {}", worker_id);
+            }
+            Err(e) => {
+                error!("Failed in browser worker {}: {}", worker_id, e);
+            }
+        }
+        info!("Stopping browser worker {}", worker_id);
         Ok(())
     }
 }

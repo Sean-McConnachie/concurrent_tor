@@ -276,7 +276,7 @@ where
         let scheduler = self.scheduler.clone();
         let monitor_clone = self.monitor.clone();
         let enqueue_thread = tokio::task::spawn(async move {
-            Self::loop_enqueue(
+            match Self::loop_enqueue(
                 monitor_clone,
                 self.db,
                 self.queue_job,
@@ -284,9 +284,14 @@ where
                 scheduler,
             )
             .await
+            {
+                Ok(_) => info!("Enqueue loop stopped"),
+                Err(e) => error!("Enqueue loop stopped with error: {:?}", e),
+            }
+            Ok(())
         });
         let dequeue_thread = tokio::task::spawn(async move {
-            Self::loop_dequeue(
+            match Self::loop_dequeue(
                 self.monitor,
                 self.request_job,
                 self.dequeue_job,
@@ -295,6 +300,11 @@ where
                 self.worker_config,
             )
             .await
+            {
+                Ok(_) => info!("Dequeue loop stopped"),
+                Err(e) => error!("Dequeue loop stopped with error: {:?}", e),
+            }
+            Ok(())
         });
         [enqueue_thread, dequeue_thread]
     }
