@@ -155,6 +155,7 @@ where
 
             match worker_job_logic_start(
                 self.worker_id,
+                WorkerType::Http,
                 job,
                 &mut self.platform_data,
                 &self.monitor,

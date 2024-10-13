@@ -27,7 +27,7 @@ use log::{debug, error, info, warn};
 use reqwest::Url;
 use std::{
     collections::HashMap,
-    fmt::Debug,
+    fmt::{Debug, Display, Formatter},
     str::FromStr,
     sync::{Arc, Mutex},
     time::Duration,
@@ -64,6 +64,15 @@ pub trait MainClient<C: Client>: Send + Sync + Clone {
 pub enum WorkerType {
     Http,
     Browser,
+}
+
+impl Display for WorkerType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WorkerType::Http => write!(f, "http"),
+            WorkerType::Browser => write!(f, "browser"),
+        }
+    }
 }
 
 pub struct CTorClient {
@@ -271,6 +280,7 @@ pub(crate) enum WorkerLogicAction<P: PlatformT> {
 
 pub(crate) async fn worker_job_logic_start<P, D>(
     worker_id: u16,
+    worker_type: WorkerType,
     job: Job<NotRequested, P>,
     platforms: &mut HashMap<P, D>,
     monitor: &Sender<Event<P>>,
@@ -280,6 +290,7 @@ where
     P: PlatformT,
     D: PlatformHistory,
 {
+    debug!("Starting job for {worker_type} worker {worker_id}");
     let ts_start = quanta::Instant::now();
     let job_platform = job.platform;
     let platform = platforms.get_mut(&job.platform).unwrap();
@@ -361,6 +372,7 @@ where
     P: PlatformT,
     D: PlatformHistory,
 {
+    debug!("Processing job for {worker_type} worker {worker_id}");
     let platform = platforms.get_mut(&original_job.platform).unwrap();
     let ts_end = quanta::Instant::now();
     platform.request_complete(ts_end);
@@ -434,7 +446,7 @@ where
 
     if !original_job_completed {
         panic!(
-            "Original job not found in http worker {}. You must include the \
+            "Original job not found in worker {}. You must include the \
                         original job with its updated status in the return vector! ",
             worker_id
         );

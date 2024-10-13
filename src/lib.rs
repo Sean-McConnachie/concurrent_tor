@@ -11,8 +11,8 @@ pub mod exports {
     pub use arti_client::{TorClient, TorClientConfig};
     pub use async_channel::{Receiver as AsyncChannelReceiver, Sender as AsyncChannelSender};
     pub use async_trait::async_trait;
+    pub use fantoccini;
     pub use futures_util::TryFutureExt;
-    pub use headless_chrome;
     pub use http_body_util::BodyExt as HttpBodyUtilBodyExt;
     pub use hyper::http::Method as HttpMethod;
     pub use murmur3::murmur3_x64_128;

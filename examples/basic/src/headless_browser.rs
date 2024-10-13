@@ -2,14 +2,15 @@ use crate::Platform;
 use concurrent_tor::{
     execution::{
         browser::{BrowserPlatform, BrowserPlatformBuilder},
-        scheduler::{Job, NotRequested, QueueJob, Requested, WorkerRequest},
+        scheduler::{Job, NotRequested, QueueJob, WorkerRequest},
     },
-    exports::{async_trait, headless_chrome::Tab, json_from_str, json_to_string},
+    exports::{async_trait,  json_from_str, json_to_string},
     Result,
 };
-use log::{error, info};
+use log::{info};
 use serde::{Deserialize, Serialize};
-use std::{any::Any, sync::Arc};
+use std::{any::Any, };
+use concurrent_tor::exports::fantoccini;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MyHeadlessBrowserRequest {
@@ -53,30 +54,16 @@ impl BrowserPlatform<Platform> for MyHeadlessBrowser {
     async fn process_job(
         &self,
         job: &Job<NotRequested, Platform>,
-        tab: Arc<Tab>,
+        client: &fantoccini::Client,
     ) -> Vec<QueueJob<Platform>> {
-        error!("Processing browser request {:?}", job);
         let req: &MyHeadlessBrowserRequest = job.request.as_any().downcast_ref().unwrap();
-        info!("Processing browser request: {:?}", req);
-        let url = req.url.clone();
-        let handle = tokio::task::spawn_blocking(move || {
-            tab.navigate_to(&url)?;
-            tab.wait_until_navigated()?;
-            let ip = tab.get_content()?;
-            Result::<_>::Ok(ip)
-        });
-        match handle.await.expect("Failed to execute browser handle") {
-            Ok(ip) => {
-                info!("Browser request return ip: {}", ip);
-                let completed: Job<Requested, Platform> = job.into();
-                vec![QueueJob::Completed(completed)]
-            }
-            Err(e) => {
-                error!("Failed to get ip: {:?}", e);
-                let retry: Job<Requested, Platform> = job.into();
-                vec![QueueJob::Retry(retry)]
-            }
-        }
+        info!("Processing headless browser request: {:?}", req);
+
+        client.goto(&req.url).await.expect("Failed to navigate to url");
+        let ip = client.source().await.expect("Failed to get source");
+        info!("Browser headless request return ip: {}", ip);
+
+        vec![QueueJob::Completed(job.into())]
     }
 }
 

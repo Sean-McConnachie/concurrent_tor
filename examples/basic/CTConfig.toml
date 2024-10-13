@@ -3,21 +3,24 @@ target_circulation = 10
 http_workers = 1
 headless_browser_workers = 1
 headed_browser_workers = 1
+driver_fp = "/home/dude/dev/_ongoing/concurrent_tor/examples/basic/geckodriver"
+socks_start_port = 9050
+driver_start_port = 4444
 
 [http_platforms]
 
 [http_platforms.MyHttp]
-max_requests = 10
+max_requests = 1
 timeout_ms = 500
 
 [browser_platforms]
 
 [browser_platforms.MyHeadedBrowser]
-max_requests = 10
+max_requests = 1
 timeout_ms = 500
 headless = false
 
 [browser_platforms.MyHeadlessBrowser]
-max_requests = 10
+max_requests = 1
 timeout_ms = 500
 headless = true

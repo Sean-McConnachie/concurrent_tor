@@ -108,18 +108,9 @@ where
             let mut worker_channels = vec![None; n_platforms];
             for (i, var) in P::iter().enumerate() {
                 worker_channels[i] = Some(match platform_to_worker_type.get(&var).unwrap() {
-                    SpecificWorkerType::Http => {
-                        println!("http_wrkr_tx: {}", i);
-                        http_wrkr_tx.clone()
-                    }
-                    SpecificWorkerType::HeadlessBrowser => {
-                        println!("hl_brsr_wrkr_tx: {}", i);
-                        hl_brsr_wrkr_tx.clone()
-                    }
-                    SpecificWorkerType::HeadedBrowser => {
-                        println!("hd_brsr_wrkr_tx: {}", i);
-                        hd_brsr_wrkr_tx.clone()
-                    }
+                    SpecificWorkerType::Http => http_wrkr_tx.clone(),
+                    SpecificWorkerType::HeadlessBrowser => hl_brsr_wrkr_tx.clone(),
+                    SpecificWorkerType::HeadedBrowser => hd_brsr_wrkr_tx.clone(),
                 });
             }
             worker_channels
@@ -194,69 +185,55 @@ where
             .collect::<Vec<_>>();
 
         // Build Browser workers
-        const STARTING_PORT: u16 = 9050;
-        let build_browser_worker =
-            |worker_id, headless, rx: Receiver<WorkerAction<P>>, tx: Sender<WorkerAction<P>>| {
-                let platform_data = browser_platforms
-                    .iter()
-                    .map(|builder| {
-                        let platform = builder.platform();
-                        (
-                            platform.clone(),
-                            BrowserPlatformData::new(
-                                browser_platform_configs.get(&platform).unwrap().clone(),
-                            ),
-                        )
-                    })
-                    .collect::<HashMap<_, _>>();
-                let platform_impls = browser_platforms
-                    .iter()
-                    .map(|builder| {
-                        let platform = builder.platform();
-                        (platform.clone(), builder.build())
-                    })
-                    .collect::<HashMap<_, _>>();
-                let socks_port = STARTING_PORT + worker_id;
-                BrowserWorker::new(
-                    worker_id,
-                    monitor_tx.clone(),
-                    request_job_tx.clone(),
-                    rx.clone(),
-                    tx.clone(),
-                    queue_job_tx.clone(),
-                    main_client.clone(),
-                    platform_data,
-                    platform_impls,
-                    headless,
-                    socks_port,
-                )
-                .unwrap()
-            };
         let (n_http, n_hd_brsr, n_hl_brsr) = (
             worker_config.http_workers,
             worker_config.headed_browser_workers,
             worker_config.headless_browser_workers,
         );
-        let browser_workers = (0..n_hl_brsr)
-            .map(|i| {
-                // Start headless browser workers first
-                build_browser_worker(
-                    n_http + n_hl_brsr + i,
-                    true,
-                    hl_brsr_wrkr_rx.clone(),
-                    hl_brsr_wrkr_tx.clone(),
-                )
-            })
-            .chain((0..n_hd_brsr).map(|i| {
-                // Then start headed browser workers
-                build_browser_worker(
-                    n_http + n_hl_brsr + n_hd_brsr + i,
-                    false,
-                    hd_brsr_wrkr_rx.clone(),
-                    hd_brsr_wrkr_tx.clone(),
-                )
-            }))
-            .collect::<Vec<_>>();
+        let browser_workers = {
+            let mut browser_workers = Vec::with_capacity((n_hd_brsr + n_hl_brsr) as usize);
+            for i in 0..n_hl_brsr {
+                browser_workers.push(
+                    Self::build_browser_worker(
+                        n_hl_brsr + i,
+                        true,
+                        hl_brsr_wrkr_rx.clone(),
+                        hl_brsr_wrkr_tx.clone(),
+                        monitor_tx.clone(),
+                        request_job_tx.clone(),
+                        queue_job_tx.clone(),
+                        main_client.clone(),
+                        &browser_platform_configs,
+                        &browser_platforms,
+                        worker_config.driver_fp.clone(),
+                        worker_config.socks_start_port,
+                        worker_config.driver_start_port,
+                    )
+                    .await?,
+                );
+            }
+            for i in 0..n_hd_brsr {
+                browser_workers.push(
+                    Self::build_browser_worker(
+                        n_http + n_hl_brsr + i,
+                        false,
+                        hd_brsr_wrkr_rx.clone(),
+                        hd_brsr_wrkr_tx.clone(),
+                        monitor_tx.clone(),
+                        request_job_tx.clone(),
+                        queue_job_tx.clone(),
+                        main_client.clone(),
+                        &browser_platform_configs,
+                        &browser_platforms,
+                        worker_config.driver_fp.clone(),
+                        worker_config.socks_start_port,
+                        worker_config.driver_start_port,
+                    )
+                    .await?,
+                );
+            }
+            browser_workers
+        };
 
         const QUEUE_WORKERS: usize = 2;
         let mut handles = Vec::with_capacity(http_workers.len() + QUEUE_WORKERS);
@@ -307,6 +284,64 @@ where
         self.monitor_handle.await??;
         info!("Joined monitor handle");
         Ok(())
+    }
+
+    async fn build_browser_worker<M, C>(
+        worker_id: u16,
+        headless: bool,
+        rx: Receiver<WorkerAction<P>>,
+        tx: Sender<WorkerAction<P>>,
+        monitor_tx: Sender<Event<P>>,
+        request_job_tx: Sender<QueueJobStatus>,
+        queue_job_tx: Sender<QueueJob<P>>,
+        main_client: M,
+        browser_platform_configs: &HashMap<P, BrowserPlatformConfig>,
+        browser_platforms: &Vec<Box<dyn BrowserPlatformBuilder<P>>>,
+        driver_fp: String,
+        socks_start_port: u16,
+        driver_start_port: u16,
+    ) -> Result<BrowserWorker<P, C, M>>
+    where
+        M: MainClient<C> + 'static,
+        C: Client + 'static,
+    {
+        let platform_data = browser_platforms
+            .iter()
+            .map(|builder| {
+                let platform = builder.platform();
+                (
+                    platform.clone(),
+                    BrowserPlatformData::new(
+                        browser_platform_configs.get(&platform).unwrap().clone(),
+                    ),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let platform_impls = browser_platforms
+            .iter()
+            .map(|builder| {
+                let platform = builder.platform();
+                (platform, builder.build())
+            })
+            .collect::<HashMap<_, _>>();
+        let driver_port = driver_start_port + worker_id;
+        let socks_port = socks_start_port + worker_id;
+        BrowserWorker::new(
+            worker_id,
+            monitor_tx,
+            request_job_tx,
+            rx,
+            tx,
+            queue_job_tx,
+            main_client,
+            platform_data,
+            platform_impls,
+            headless,
+            driver_port,
+            socks_port,
+            driver_fp,
+        )
+        .await
     }
 
     pub fn graceful_stop_fn(

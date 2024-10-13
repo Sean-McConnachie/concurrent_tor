@@ -16,6 +16,8 @@ pub enum Error {
     AnyhowError(anyhow::Error),
     RequestError(reqwest::Error),
     AsyncChannelError(String),
+    FantocciniCmdError(fantoccini::error::CmdError),
+    FantocciniNewSessionError(fantoccini::error::NewSessionError),
     Other(Box<dyn std::error::Error>),
 }
 
@@ -29,6 +31,18 @@ impl std::error::Error for Error {}
 
 unsafe impl Send for Error {}
 unsafe impl Sync for Error {}
+
+impl From<fantoccini::error::CmdError> for Error {
+    fn from(e: fantoccini::error::CmdError) -> Self {
+        Error::FantocciniCmdError(e)
+    }
+}
+
+impl From<fantoccini::error::NewSessionError> for Error {
+    fn from(e: fantoccini::error::NewSessionError) -> Self {
+        Error::FantocciniNewSessionError(e)
+    }
+}
 
 impl From<async_channel::RecvError> for Error {
     fn from(e: async_channel::RecvError) -> Self {

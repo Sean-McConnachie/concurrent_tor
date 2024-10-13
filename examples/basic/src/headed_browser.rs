@@ -2,14 +2,16 @@ use crate::Platform;
 use concurrent_tor::{
     execution::{
         browser::{BrowserPlatform, BrowserPlatformBuilder},
-        scheduler::{Job, NotRequested, QueueJob, Requested, WorkerRequest},
+        scheduler::{Job, NotRequested, QueueJob, WorkerRequest},
     },
-    exports::{async_trait, headless_chrome::Tab, json_from_str, json_to_string},
+    exports::{async_trait, json_from_str, json_to_string},
     Result,
 };
-use log::{error, info};
+use log::{info};
 use serde::{Deserialize, Serialize};
-use std::{any::Any, sync::Arc};
+use std::{any::Any, };
+use concurrent_tor::exports::fantoccini;
+use concurrent_tor::exports::fantoccini::Locator;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MyHeadedBrowserRequest {
@@ -53,30 +55,19 @@ impl BrowserPlatform<Platform> for MyHeadedBrowser {
     async fn process_job(
         &self,
         job: &Job<NotRequested, Platform>,
-        tab: Arc<Tab>,
+        client: &fantoccini::Client,
     ) -> Vec<QueueJob<Platform>> {
         let req: &MyHeadedBrowserRequest = job.request.as_any().downcast_ref().unwrap();
-        info!("Processing browser request: {:?}", req);
-        let url = req.url.clone();
-        let handle = tokio::task::spawn_blocking(move || {
-            tab.navigate_to(&url).unwrap();
-            let ip = tab
-                .wait_for_element("#ipv4 > a:nth-child(1)")?
-                .get_inner_text()?;
-            Result::<_>::Ok(ip)
-        });
-        match handle.await.expect("Failed to execute browser handle") {
-            Ok(ip) => {
-                info!("Browser request return ip: {}", ip);
-                let completed: Job<Requested, Platform> = job.into();
-                vec![QueueJob::Completed(completed)]
-            }
-            Err(e) => {
-                error!("Failed to get ip: {:?}", e);
-                let retry: Job<Requested, Platform> = job.into();
-                vec![QueueJob::Retry(retry)]
-            }
-        }
+        info!("Processing headed browser request: {:?}", req);
+
+        client.goto(&req.url).await.expect("Failed to navigate to url");
+        let ip = client
+            .find(Locator::Css("#ipv4 > a:nth-child(1)"))
+            .await.expect("Failed to find element");
+        let ip = ip.text().await.expect("Failed to get text");
+        info!("Browser headed request return ip: {}", ip);
+
+        vec![QueueJob::Completed(job.into())]
     }
 }
 

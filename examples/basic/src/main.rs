@@ -22,6 +22,12 @@ async fn main() -> anyhow::Result<()> {
     const STOP_AFTER_S: u64 = 7;
     const SEND_TIMEOUT_MS: u64 = 500;
 
+    let _ = std::process::Command::new("kill")
+        .arg("-9")
+        .arg("geckodriver")
+        .output()
+        .expect("Failed to kill firefox instances");
+
     let ct_config = ScraperConfig::<Platform>::init("CTConfig.toml")?;
     let ct_rt = CTRuntime::run(
         ct_config.workers,

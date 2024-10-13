@@ -15,10 +15,14 @@ use crate::{
 };
 use async_channel::{Receiver, Sender};
 use async_trait::async_trait;
-use headless_chrome::{Browser, FetcherOptions, LaunchOptions, Revision, Tab};
+use fantoccini::wd::Capabilities;
 use log::{debug, info};
-use std::{collections::HashMap, sync::Arc, time::Duration};
-use tokio::task::JoinHandle;
+use serde::Serialize;
+use std::{collections::HashMap, process::Stdio};
+use tokio::{
+    process::{Child, Command},
+    task::JoinHandle,
+};
 
 pub trait BrowserPlatformBuilder<P: PlatformT>: Send {
     fn platform(&self) -> P;
@@ -28,7 +32,63 @@ pub trait BrowserPlatformBuilder<P: PlatformT>: Send {
 #[async_trait]
 pub trait BrowserPlatform<P: PlatformT>: Send {
     /// Function should not fail when passed back to the API. Therefore, it should handle all errors itself.
-    async fn process_job(&self, job: &Job<NotRequested, P>, tab: Arc<Tab>) -> Vec<QueueJob<P>>;
+    async fn process_job(
+        &self,
+        job: &Job<NotRequested, P>,
+        client: &fantoccini::Client,
+    ) -> Vec<QueueJob<P>>;
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(self) struct FirefoxProxy {
+    proxy_type: String,
+    socks_proxy: String,
+    socks_version: i32,
+}
+
+#[derive(Serialize)]
+pub(self) struct FirefoxArgs {
+    args: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub(self) struct FirefoxOpts {
+    proxy: Option<FirefoxProxy>,
+    #[serde(rename = "moz:firefoxOptions")]
+    headless: FirefoxArgs,
+}
+
+impl FirefoxOpts {
+    fn to_capabilities(&self) -> Capabilities {
+        let value = serde_json::to_value(self).unwrap();
+        if let serde_json::Value::Object(map) = value {
+            map
+        } else {
+            panic!("Expected FirefoxOpts to serialize into an object");
+        }
+    }
+}
+
+impl FirefoxOpts {
+    fn new(socks_port: u16, headless: bool, use_proxy: bool) -> Self {
+        Self {
+            proxy: match use_proxy {
+                true => Some(FirefoxProxy {
+                    proxy_type: "socks".to_string(),
+                    socks_proxy: format!("localhost:{}", socks_port),
+                    socks_version: 5,
+                }),
+                false => None,
+            },
+            headless: FirefoxArgs {
+                args: match headless {
+                    true => vec!["--headless".to_string()],
+                    false => vec![],
+                },
+            },
+        }
+    }
 }
 
 pub(crate) struct BrowserPlatformData {
@@ -90,13 +150,18 @@ pub(crate) struct BrowserWorker<P: PlatformT, C: Client, M: MainClient<C>> {
     platform_impls: HashMap<P, Box<dyn BrowserPlatform<P>>>,
     /// Proxy handle
     proxy_handle: JoinHandle<()>,
-    // /// Browser handle
-    // browser: Browser,
-    #[allow(dead_code)]
-    /// Headless mode
-    headless: bool,
+    /// Driver handle
+    driver_handle: Child,
+    /// Browser client
+    browser: fantoccini::Client,
+    /// Driver port
+    driver_port: u16,
     /// Listener port
-    port: u16,
+    socks_port: u16,
+    /// Firefox options
+    firefox_opts: FirefoxOpts,
+    /// Path to the driver
+    driver_fp: String,
     _client: std::marker::PhantomData<C>,
 }
 
@@ -106,26 +171,15 @@ where
     C: Client,
     M: MainClient<C>,
 {
-    fn build_browser_opts<'a>(socks_addr: &'a str, worker_id: u16, headless: bool) -> LaunchOptions<'a> {
-        const DEBUG_START_PORT: u16 = 4444;
-        let headless_str = if headless { "headless" } else { "headed" };
-        info!("Creating {} browser worker", headless_str);
-        let mut browser_opts = LaunchOptions::default_builder();
-        browser_opts.port(Some(DEBUG_START_PORT + worker_id));
-        if M::use_proxy() {
-            browser_opts.proxy_server(Some(&socks_addr));
-        }
-        browser_opts
-            .fetcher_options(
-                FetcherOptions::default().with_revision(Revision::Specific("1367994".into())),
-            )
-            .idle_browser_timeout(Duration::from_secs(u64::MAX))
-            .headless(headless)
-            .build()
-            .expect("Failed to find chrome executable")
+    async fn connect_browser(opts: &FirefoxOpts, driver_port: u16) -> Result<fantoccini::Client> {
+        let browser = fantoccini::ClientBuilder::native()
+            .capabilities(opts.to_capabilities())
+            .connect(&format!("http://localhost:{}", driver_port))
+            .await?;
+        Ok(browser)
     }
 
-    pub fn new(
+    pub async fn new(
         worker_id: u16,
         monitor: Sender<Event<P>>,
         request_job: Sender<QueueJobStatus>,
@@ -136,11 +190,18 @@ where
         platform_data: HashMap<P, BrowserPlatformData>,
         platform_impls: HashMap<P, Box<dyn BrowserPlatform<P>>>,
         headless: bool,
-        port: u16,
+        driver_port: u16,
+        socks_port: u16,
+        driver_fp: String,
     ) -> Result<Self> {
         let headless_str = if headless { "headless" } else { "headed" };
         info!("Creating {} browser worker {}", headless_str, worker_id);
-        let proxy_handle = Self::start_proxy_handle(worker_id, &main_client, port);
+
+        let proxy_handle = Self::start_proxy_handle(worker_id, &main_client, socks_port);
+        let driver_handle = Self::start_driver_handle(worker_id, &driver_fp, driver_port);
+        let firefox_opts = FirefoxOpts::new(socks_port, headless, M::use_proxy());
+        let browser = Self::connect_browser(&firefox_opts, driver_port).await?;
+
         Ok(BrowserWorker {
             worker_id,
             monitor,
@@ -152,35 +213,53 @@ where
             main_client,
             platform_data,
             platform_impls,
-            // browser,
-            headless,
-            port,
+            driver_handle,
+            firefox_opts,
+            browser,
+            driver_port,
+            socks_port,
+            driver_fp,
             _client: std::marker::PhantomData,
         })
     }
 
-    pub fn format_socks_proxy_addr(port: u16) -> String {
-        format!("socks5://localhost:{}", port)
-    }
-
-    fn start_proxy_handle(worker_id: u16, main_client: &M, port: u16) -> JoinHandle<()> {
+    fn start_proxy_handle(worker_id: u16, main_client: &M, proxy_port: u16) -> JoinHandle<()> {
         info!("Starting proxy for browser worker {}", worker_id);
         if M::use_proxy() {
             let client = main_client.isolated_client();
             client
-                .start_proxy(port)
+                .start_proxy(proxy_port)
                 .expect("Proxy implementation must return a join handle.")
         } else {
             tokio::spawn(async {})
         }
     }
 
-    fn renew_client(self) -> Result<Self> {
+    fn start_driver_handle(worker_id: u16, driver_fp: &str, driver_port: u16) -> Child {
+        info!("Starting driver for browser worker {}", worker_id);
+        Command::new(driver_fp)
+            .arg("--port")
+            .arg(driver_port.to_string())
+            .stdin(Stdio::null())
+            .spawn()
+            .expect("Failed to start browser")
+    }
+
+    async fn renew_client(mut self) -> Result<Self> {
         debug!("Renewing client for browser worker {}", self.worker_id);
+        self.browser.close_window().await?;
+        self.browser.close().await?;
+        self.driver_handle.kill().await?;
         self.proxy_handle.abort();
-        let proxy_handle = Self::start_proxy_handle(self.worker_id, &self.main_client, self.port);
+        let proxy_handle =
+            Self::start_proxy_handle(self.worker_id, &self.main_client, self.socks_port);
+        let driver_handle =
+            Self::start_driver_handle(self.worker_id, &self.driver_fp, self.driver_port);
+        let browser = Self::connect_browser(&self.firefox_opts, self.socks_port).await?;
         Ok(BrowserWorker {
             proxy_handle,
+            driver_handle,
+            browser,
             ..self
         })
     }
@@ -198,6 +277,7 @@ where
 
             match worker_job_logic_start(
                 self.worker_id,
+                WorkerType::Browser,
                 job,
                 &mut self.platform_data,
                 &self.monitor,
@@ -207,26 +287,15 @@ where
             {
                 WorkerLogicAction::Nothing => {}
                 WorkerLogicAction::RenewClient => {
-                    self = self.renew_client()?;
+                    self = self.renew_client().await?;
                 }
                 WorkerLogicAction::ProcessJob((ts_start, job)) => {
-                    let socks_addr = Self::format_socks_proxy_addr(self.port);
-                    let browser_opts = Self::build_browser_opts(&socks_addr, self.worker_id, self.headless);
-                    let browser = Browser::new(browser_opts)?;
-                    let tab = browser.new_tab()?;
                     let platform_impl = self.platform_impls.get(&job.platform).unwrap();
-                    let jobs = platform_impl.process_job(&job, tab.clone()).await;
-                    tokio::task::spawn_blocking(move || match { tab.close(false) } {
-                        Ok(_) => {}
-                        Err(e) => {
-                            debug!("Failed to close tab: {:?}. Already closed?", e);
-                        }
-                    })
-                    .await?;
+                    let jobs = platform_impl.process_job(&job, &self.browser).await;
                     worker_job_logic_process(
                         ts_start,
                         self.worker_id,
-                        WorkerType::Http,
+                        WorkerType::Browser,
                         job,
                         jobs,
                         &mut self.platform_data,
