@@ -3,6 +3,14 @@ name = "concurrent_tor"
 version = "1.0.0"
 edition = "2021"
 
+authors = ["Sean McConnachie <seanjulian.mcc@gmail.com>"]
+license = "MIT OR Apache-2.0"
+
+readme = "README.md"
+description = "A comprehensive scraping runtime."
+keywords = ["tor", "queue", "async", "request", "scraper"]
+repository = "https://github.com/Sean-McConnachie/concurrent_tor"
+
 [dependencies]
 async-channel = "2.3.1"
 serde = { version = "1.0.210", features = ["derive"] }
