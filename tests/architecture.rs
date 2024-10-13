@@ -389,7 +389,7 @@ mod browser {
         Result,
     };
     use serde::{Deserialize, Serialize};
-    use std::{any::Any, };
+    use std::any::Any;
 
     #[derive(Serialize, Deserialize, Debug, Clone)]
     pub struct MyBrowserRequest {
@@ -916,8 +916,7 @@ mod tests {
     };
     use concurrent_tor::{execution::monitor::Event, quanta_zero};
     use log::info;
-    use std::{collections::HashMap, sync::atomic::Ordering};
-    use std::process::Command;
+    use std::{collections::HashMap, process::Command, sync::atomic::Ordering};
 
     #[allow(dead_code)]
     #[derive(Debug)]

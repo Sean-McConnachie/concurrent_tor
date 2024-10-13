@@ -75,8 +75,8 @@ impl FirefoxOpts {
         Self {
             proxy: match use_proxy {
                 true => Some(FirefoxProxy {
-                    proxy_type: "socks".to_string(),
-                    socks_proxy: format!("localhost:{}", socks_port),
+                    proxy_type: "manual".to_string(),
+                    socks_proxy: format!("127.0.0.1:{}", socks_port),
                     socks_version: 5,
                 }),
                 false => None,
