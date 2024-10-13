@@ -25,6 +25,11 @@ cd concurrent_tor/examples/basic
 cargo run --release --features use_tor_backend
 ```
 
+```toml
+# Or use it as a dependency!
+concurrent_tor = "1.0.0"
+```
+
 ## Architecture
 ![Architecture](images/architecture.png)
 
