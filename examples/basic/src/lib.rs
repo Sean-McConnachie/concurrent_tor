@@ -4,10 +4,14 @@ pub mod headless_browser;
 pub mod http;
 pub mod monitor;
 
-use concurrent_tor::{build_platform_enum, impl_platform_return_t, execution::scheduler::{PlatformT, PlatformReturnT, WorkerRequest}, Result};
+use concurrent_tor::{
+    build_platform_enum,
+    execution::scheduler::{PlatformReturnT, PlatformT, WorkerRequest},
+    exports::json_from_str,
+    impl_platform_return_t, Result,
+};
 use serde::{Deserialize, Serialize};
 use strum::{EnumIter, FromRepr};
-use concurrent_tor::exports::json_from_str;
 
 #[cfg(feature = "use_tor_backend")]
 pub mod backend {

@@ -40,7 +40,7 @@ pub trait PlatformT:
 #[macro_export]
 macro_rules! impl_platform_return_t {
     ( $enum_name:ident, $builder:path => [ $( $variant:ident ),+ ] ) => {
-        impl PlatformReturnT<$enum_name> for $builder {
+        impl $crate::scheduler::PlatformReturnT<$enum_name> for $builder {
             fn platforms(&self) -> Vec<$enum_name> {
                 vec![ $(
                     $enum_name::$variant,
@@ -57,18 +57,23 @@ macro_rules! build_platform_enum {
         { $( $variant:ident => $request_type:path ),+ },
         { $( $builder:path => $variants:tt ),+ }
     ) => {
-        #[derive(Serialize, Deserialize, Debug, Clone, Copy, Hash, Eq, PartialEq, FromRepr, EnumIter)]
+        #[derive(serde::Serialize, serde::Deserialize, Debug,
+            Clone, Copy, Hash, Eq, PartialEq, strum::FromRepr, strum::EnumIter)]
         pub enum $enum_name {
             $( $variant ),+
         }
 
-        impl PlatformT for $enum_name {
-            fn request_from_json(&self, json: &str) -> Result<Box<dyn WorkerRequest>> {
+        impl $crate::scheduler::PlatformT for $enum_name {
+            fn request_from_json(
+                &self,
+                json: &str
+            ) -> $crate::Result<Box<dyn $crate::scheduler::WorkerRequest>> {
                 Ok(match self {
                     $(
-                        $enum_name::$variant => Box::new(json_from_str::<$request_type>(json)?),
+                        $enum_name::$variant => Box::new(
+                            $crate::exports::json_from_str::<$request_type>(json)?
+                        ),
                     )+
-                    _ => todo!()
                 })
             }
 
@@ -83,7 +88,7 @@ macro_rules! build_platform_enum {
 
 
         $(
-        impl_platform_return_t!($enum_name, $builder => $variants);
+        $crate::impl_platform_return_t!($enum_name, $builder => $variants);
         )+
     };
 }

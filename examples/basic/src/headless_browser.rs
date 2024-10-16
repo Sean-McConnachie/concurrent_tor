@@ -4,13 +4,12 @@ use concurrent_tor::{
         browser::{BrowserPlatform, BrowserPlatformBuilder},
         scheduler::{Job, NotRequested, QueueJob, WorkerRequest},
     },
-    exports::{async_trait,  json_from_str, json_to_string},
+    exports::{async_trait, fantoccini, json_from_str, json_to_string},
     Result,
 };
-use log::{info};
+use log::info;
 use serde::{Deserialize, Serialize};
-use std::{any::Any, };
-use concurrent_tor::exports::fantoccini;
+use std::any::Any;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MyHeadlessBrowserRequest {
@@ -59,7 +58,10 @@ impl BrowserPlatform<Platform> for MyHeadlessBrowser {
         let req: &MyHeadlessBrowserRequest = job.request.as_any().downcast_ref().unwrap();
         info!("Processing headless browser request: {:?}", req);
 
-        client.goto(&req.url).await.expect("Failed to navigate to url");
+        client
+            .goto(&req.url)
+            .await
+            .expect("Failed to navigate to url");
         let ip = client.source().await.expect("Failed to get source");
         info!("Browser headless request return ip: {}", ip);
 

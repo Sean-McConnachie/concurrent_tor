@@ -165,9 +165,12 @@ where
                 let mut platform_data = HashMap::new();
                 for builder in &http_platforms {
                     for platform in builder.platforms() {
-                        platform_data.insert(platform, HttpPlatformData::new(
-                            http_platform_configs.get(&platform).unwrap().clone(),
-                        ));
+                        platform_data.insert(
+                            platform,
+                            HttpPlatformData::new(
+                                http_platform_configs.get(&platform).unwrap().clone(),
+                            ),
+                        );
                     }
                 }
                 let mut platform_impls = HashMap::new();
@@ -314,9 +317,12 @@ where
         let mut platform_data = HashMap::new();
         for builder in browser_platforms {
             for platform in builder.platforms() {
-                platform_data.insert(platform, BrowserPlatformData::new(
-                    browser_platform_configs.get(&platform).unwrap().clone(),
-                ));
+                platform_data.insert(
+                    platform,
+                    BrowserPlatformData::new(
+                        browser_platform_configs.get(&platform).unwrap().clone(),
+                    ),
+                );
             }
         }
         let mut platform_impls = HashMap::new();

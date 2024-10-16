@@ -7,6 +7,8 @@ pub mod utils;
 pub use error::{Error, Result};
 pub use utils::*;
 
+pub use execution::*;
+
 pub mod exports {
     pub use arti_client::{TorClient, TorClientConfig};
     pub use async_channel::{Receiver as AsyncChannelReceiver, Sender as AsyncChannelSender};

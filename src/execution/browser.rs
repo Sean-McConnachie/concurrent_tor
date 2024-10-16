@@ -7,8 +7,8 @@ use crate::{
         },
         monitor::Event,
         scheduler::{
-            Job, NotRequested, PlatformCanRequest, PlatformHistory, PlatformT, QueueJob,
-            QueueJobStatus, WorkerAction,
+            Job, NotRequested, PlatformCanRequest, PlatformHistory, PlatformReturnT, PlatformT,
+            QueueJob, QueueJobStatus, WorkerAction,
         },
     },
     quanta_zero, Result,
@@ -23,7 +23,6 @@ use tokio::{
     process::{Child, Command},
     task::JoinHandle,
 };
-use crate::execution::scheduler::PlatformReturnT;
 
 pub trait BrowserPlatformBuilder<P: PlatformT>: Send + PlatformReturnT<P> {
     fn build(&self) -> Box<dyn BrowserPlatform<P>>;

@@ -139,3 +139,9 @@ impl From<serde_json::Error> for Error {
         Error::Other(Box::new(e))
     }
 }
+
+impl From<Box<dyn std::error::Error>> for Error {
+    fn from(value: Box<dyn std::error::Error>) -> Self {
+        Error::Other(value)
+    }
+}

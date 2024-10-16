@@ -4,14 +4,12 @@ use concurrent_tor::{
         browser::{BrowserPlatform, BrowserPlatformBuilder},
         scheduler::{Job, NotRequested, QueueJob, WorkerRequest},
     },
-    exports::{async_trait, json_from_str, json_to_string},
+    exports::{async_trait, fantoccini, fantoccini::Locator, json_from_str, json_to_string},
     Result,
 };
-use log::{info};
+use log::info;
 use serde::{Deserialize, Serialize};
-use std::{any::Any, };
-use concurrent_tor::exports::fantoccini;
-use concurrent_tor::exports::fantoccini::Locator;
+use std::any::Any;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MyHeadedBrowserRequest {
@@ -60,10 +58,14 @@ impl BrowserPlatform<Platform> for MyHeadedBrowser {
         let req: &MyHeadedBrowserRequest = job.request.as_any().downcast_ref().unwrap();
         info!("Processing headed browser request: {:?}", req);
 
-        client.goto(&req.url).await.expect("Failed to navigate to url");
+        client
+            .goto(&req.url)
+            .await
+            .expect("Failed to navigate to url");
         let ip = client
             .find(Locator::Css("#ipv4 > a:nth-child(1)"))
-            .await.expect("Failed to find element");
+            .await
+            .expect("Failed to find element");
         let ip = ip.text().await.expect("Failed to get text");
         info!("Browser headed request return ip: {}", ip);
 

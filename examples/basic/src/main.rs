@@ -1,4 +1,4 @@
-use basic::{backend, cron,  http, monitor, Platform, headed_browser, headless_browser,};
+use basic::{backend, cron, headed_browser, headless_browser, http, monitor, Platform};
 use concurrent_tor::{
     browser_box,
     config::ScraperConfig,
