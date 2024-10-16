@@ -33,6 +33,35 @@ pub trait PlatformT:
     fn from_repr(repr: usize) -> Self;
 }
 
+#[macro_export]
+macro_rules! build_platform_enum {
+    ($enum_name:ident, { $( $variant:ident => $request_type:path ),+ } ) => {
+        #[derive(Serialize, Deserialize, Debug, Clone, Copy, Hash, Eq, PartialEq, FromRepr, EnumIter)]
+        pub enum $enum_name {
+            $( $variant ),+
+        }
+
+        impl PlatformT for $enum_name {
+            fn request_from_json(&self, json: &str) -> Result<Box<dyn WorkerRequest>> {
+                Ok(match self {
+                    $(
+                        $enum_name::$variant => Box::new(json_from_str::<$request_type>(json)?),
+                    )+
+                    _ => todo!()
+                })
+            }
+
+            fn to_repr(&self) -> usize {
+                *self as usize
+            }
+
+            fn from_repr(repr: usize) -> Self {
+                Self::from_repr(repr).unwrap()
+            }
+        }
+    };
+}
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum SpecificWorkerType {
     Http,

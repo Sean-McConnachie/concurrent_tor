@@ -3,6 +3,7 @@ target_circulation = 10
 http_workers = 1
 headless_browser_workers = 1
 headed_browser_workers = 1
+database_fp = "concurrent_tor.sqlite3"
 driver_fp = "geckodriver"
 socks_start_port = 9050
 driver_start_port = 4444

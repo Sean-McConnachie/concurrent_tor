@@ -8,6 +8,7 @@ pub struct WorkerConfig {
     pub http_workers: u16,
     pub headless_browser_workers: u16,
     pub headed_browser_workers: u16,
+    pub database_fp: String,
     pub driver_fp: String,
     pub socks_start_port: u16,
     pub driver_start_port: u16,

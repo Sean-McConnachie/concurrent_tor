@@ -4,12 +4,10 @@ pub mod headless_browser;
 pub mod http;
 pub mod monitor;
 
-use concurrent_tor::{
-    execution::scheduler::{PlatformT, WorkerRequest},
-    Result,
-};
+use concurrent_tor::{build_platform_enum, execution::scheduler::{PlatformT, WorkerRequest}, Result};
 use serde::{Deserialize, Serialize};
 use strum::{EnumIter, FromRepr};
+use concurrent_tor::exports::json_from_str;
 
 #[cfg(feature = "use_tor_backend")]
 pub mod backend {
@@ -42,29 +40,11 @@ pub mod backend {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, Hash, Eq, PartialEq, FromRepr, EnumIter)]
-pub enum Platform {
-    MyHttp,
-    MyHeadlessBrowser,
-    MyHeadedBrowser,
-}
-
-impl PlatformT for Platform {
-    fn request_from_json(&self, json: &str) -> Result<Box<dyn WorkerRequest>> {
-        match self {
-            Platform::MyHttp => http::MyHttpRequest::from_json(json),
-            Platform::MyHeadlessBrowser => {
-                headless_browser::MyHeadlessBrowserRequest::from_json(json)
-            }
-            Platform::MyHeadedBrowser => headed_browser::MyHeadedBrowserRequest::from_json(json),
-        }
+build_platform_enum!(
+    Platform,
+    {
+        MyHttp => http::MyHttpRequest,
+        MyHeadlessBrowser => headless_browser::MyHeadlessBrowserRequest,
+        MyHeadedBrowser => headed_browser::MyHeadedBrowserRequest
     }
-
-    fn to_repr(&self) -> usize {
-        *self as usize
-    }
-
-    fn from_repr(repr: usize) -> Self {
-        Self::from_repr(repr).unwrap()
-    }
-}
+);

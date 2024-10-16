@@ -108,10 +108,9 @@ where
     }
 }
 
-pub async fn connect_and_init_db() -> Result<DB> {
-    const DATABASE_FP: &str = "concurrent_tor.sqlite3";
+pub async fn connect_and_init_db(database_fp: &str) -> Result<DB> {
     let options = SqliteConnectOptions::new()
-        .filename(DATABASE_FP)
+        .filename(database_fp)
         .create_if_missing(true);
     let mut pool = SqliteConnection::connect_with(&options).await?;
     init_db(&mut pool).await?;

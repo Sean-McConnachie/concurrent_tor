@@ -5,7 +5,7 @@ use concurrent_tor::{
         http::{HttpPlatform, HttpPlatformBuilder},
         scheduler::{Job, NotRequested, QueueJob, Requested, WorkerRequest},
     },
-    exports::{async_trait, json_from_str, json_to_string, HttpMethod},
+    exports::{async_trait, json_to_string, HttpMethod},
     Result,
 };
 use log::{error, info};
@@ -27,10 +27,10 @@ impl MyHttpRequest {
         }
     }
 
-    pub fn from_json(json: &str) -> Result<Box<dyn WorkerRequest>> {
-        let s: Result<Self> = json_from_str(json).map_err(|e| e.into());
-        Ok(Box::new(s?))
-    }
+    // pub fn from_json(json: &str) -> Result<Box<dyn WorkerRequest>> {
+    //     let s: Result<Self> = json_from_str(json).map_err(|e| e.into());
+    //     Ok(Box::new(s?))
+    // }
 }
 
 impl WorkerRequest for MyHttpRequest {

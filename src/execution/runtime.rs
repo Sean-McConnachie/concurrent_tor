@@ -81,7 +81,7 @@ where
         };
         debug_assert!(n_platforms > 0, "No platforms found");
 
-        let pool = connect_and_init_db().await?;
+        let pool = connect_and_init_db(&worker_config.database_fp).await?;
 
         let (monitor_tx, monitor_rx) = unbounded::<Event<P>>();
         let (request_job_tx, request_job_rx) = unbounded::<QueueJobStatus>();

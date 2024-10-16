@@ -28,7 +28,7 @@ async fn main() -> anyhow::Result<()> {
         .output()
         .expect("Failed to kill firefox instances");
 
-    let ct_config = ScraperConfig::<Platform>::init("CTConfig.toml")?;
+    let ct_config = ScraperConfig::<Platform>::init(std::env::var("CT_CONFIG_FP")?)?;
     let ct_rt = CTRuntime::run(
         ct_config.workers,
         monitor::MyMonitor::new(),
