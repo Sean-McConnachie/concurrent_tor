@@ -101,7 +101,9 @@ where
         let worker_txs = {
             let mut platform_to_worker_type = HashMap::new();
             for http in http_platforms.iter() {
-                platform_to_worker_type.insert(http.platform(), SpecificWorkerType::Http);
+                for platform in http.platforms() {
+                    platform_to_worker_type.insert(platform, SpecificWorkerType::Http);
+                }
             }
             for (platform, browser) in browser_platform_configs.iter() {
                 platform_to_worker_type.insert(
@@ -160,25 +162,20 @@ where
         // Build HTTP workers
         let http_workers = (0..worker_config.http_workers)
             .map(|worker_id| {
-                let platform_data = http_platforms
-                    .iter()
-                    .map(|builder| {
-                        let platform = builder.platform();
-                        (
-                            platform.clone(),
-                            HttpPlatformData::new(
-                                http_platform_configs.get(&platform).unwrap().clone(),
-                            ),
-                        )
-                    })
-                    .collect::<HashMap<_, _>>();
-                let platform_impls = http_platforms
-                    .iter()
-                    .map(|builder| {
-                        let platform = builder.platform();
-                        (platform.clone(), builder.build())
-                    })
-                    .collect::<HashMap<_, _>>();
+                let mut platform_data = HashMap::new();
+                for builder in &http_platforms {
+                    for platform in builder.platforms() {
+                        platform_data.insert(platform, HttpPlatformData::new(
+                            http_platform_configs.get(&platform).unwrap().clone(),
+                        ));
+                    }
+                }
+                let mut platform_impls = HashMap::new();
+                for builder in &http_platforms {
+                    for platform in builder.platforms() {
+                        platform_impls.insert(platform, builder.build());
+                    }
+                }
                 HttpWorker::new(
                     worker_id,
                     monitor_tx.clone(),
@@ -314,25 +311,21 @@ where
         M: MainClient<C> + 'static,
         C: Client + 'static,
     {
-        let platform_data = browser_platforms
-            .iter()
-            .map(|builder| {
-                let platform = builder.platform();
-                (
-                    platform.clone(),
-                    BrowserPlatformData::new(
-                        browser_platform_configs.get(&platform).unwrap().clone(),
-                    ),
-                )
-            })
-            .collect::<HashMap<_, _>>();
-        let platform_impls = browser_platforms
-            .iter()
-            .map(|builder| {
-                let platform = builder.platform();
-                (platform, builder.build())
-            })
-            .collect::<HashMap<_, _>>();
+        let mut platform_data = HashMap::new();
+        for builder in browser_platforms {
+            for platform in builder.platforms() {
+                platform_data.insert(platform, BrowserPlatformData::new(
+                    browser_platform_configs.get(&platform).unwrap().clone(),
+                ));
+            }
+        }
+        let mut platform_impls = HashMap::new();
+        for builder in browser_platforms {
+            for platform in builder.platforms() {
+                platform_impls.insert(platform, builder.build());
+            }
+        }
+
         let driver_port = driver_start_port + worker_id;
         let socks_port = socks_start_port + worker_id;
         BrowserWorker::new(

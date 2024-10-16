@@ -76,10 +76,6 @@ impl MyHeadlessBrowserBuilder {
 }
 
 impl BrowserPlatformBuilder<Platform> for MyHeadlessBrowserBuilder {
-    fn platform(&self) -> Platform {
-        Platform::MyHeadlessBrowser
-    }
-
     fn build(&self) -> Box<dyn BrowserPlatform<Platform>> {
         Box::new(MyHeadlessBrowser {})
     }

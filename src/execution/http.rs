@@ -18,9 +18,9 @@ use async_trait::async_trait;
 use hyper::StatusCode;
 use log::{debug, info};
 use std::collections::HashMap;
+use crate::execution::scheduler::PlatformReturnT;
 
-pub trait HttpPlatformBuilder<P: PlatformT, C: Client>: Send {
-    fn platform(&self) -> P;
+pub trait HttpPlatformBuilder<P: PlatformT, C: Client>: Send + PlatformReturnT<P> {
     fn build(&self) -> Box<dyn HttpPlatform<P, C>>;
 }
 

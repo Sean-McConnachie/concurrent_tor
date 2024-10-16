@@ -14,6 +14,10 @@ use std::{fmt::Debug, hash::Hash, sync::Arc};
 use strum::IntoEnumIterator;
 use tokio::{sync::Mutex, task::JoinHandle};
 
+pub trait PlatformReturnT<P: PlatformT> {
+    fn platforms(&self) -> Vec<P>;
+}
+
 pub trait PlatformT:
     DeserializeOwned
     + Debug
@@ -34,8 +38,25 @@ pub trait PlatformT:
 }
 
 #[macro_export]
+macro_rules! impl_platform_return_t {
+    ( $enum_name:ident, $builder:path => [ $( $variant:ident ),+ ] ) => {
+        impl PlatformReturnT<$enum_name> for $builder {
+            fn platforms(&self) -> Vec<$enum_name> {
+                vec![ $(
+                    $enum_name::$variant,
+                )+ ]
+            }
+        }
+    };
+}
+
+#[macro_export]
 macro_rules! build_platform_enum {
-    ($enum_name:ident, { $( $variant:ident => $request_type:path ),+ } ) => {
+    (
+        $enum_name:ident,
+        { $( $variant:ident => $request_type:path ),+ },
+        { $( $builder:path => $variants:tt ),+ }
+    ) => {
         #[derive(Serialize, Deserialize, Debug, Clone, Copy, Hash, Eq, PartialEq, FromRepr, EnumIter)]
         pub enum $enum_name {
             $( $variant ),+
@@ -59,6 +80,11 @@ macro_rules! build_platform_enum {
                 Self::from_repr(repr).unwrap()
             }
         }
+
+
+        $(
+        impl_platform_return_t!($enum_name, $builder => $variants);
+        )+
     };
 }
 

@@ -85,10 +85,6 @@ impl MyHttpBuilder {
 }
 
 impl HttpPlatformBuilder<Platform, ClientBackend> for MyHttpBuilder {
-    fn platform(&self) -> Platform {
-        Platform::MyHttp
-    }
-
     fn build(&self) -> Box<dyn HttpPlatform<Platform, ClientBackend>> {
         Box::new(MyHttp {})
     }

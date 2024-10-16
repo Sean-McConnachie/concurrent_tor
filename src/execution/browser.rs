@@ -23,9 +23,9 @@ use tokio::{
     process::{Child, Command},
     task::JoinHandle,
 };
+use crate::execution::scheduler::PlatformReturnT;
 
-pub trait BrowserPlatformBuilder<P: PlatformT>: Send {
-    fn platform(&self) -> P;
+pub trait BrowserPlatformBuilder<P: PlatformT>: Send + PlatformReturnT<P> {
     fn build(&self) -> Box<dyn BrowserPlatform<P>>;
 }
 

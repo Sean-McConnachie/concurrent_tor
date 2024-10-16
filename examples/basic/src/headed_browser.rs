@@ -80,10 +80,6 @@ impl MyHeadedBrowserBuilder {
 }
 
 impl BrowserPlatformBuilder<Platform> for MyHeadedBrowserBuilder {
-    fn platform(&self) -> Platform {
-        Platform::MyHeadedBrowser
-    }
-
     fn build(&self) -> Box<dyn BrowserPlatform<Platform>> {
         Box::new(MyHeadedBrowser {})
     }
