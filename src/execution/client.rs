@@ -1,15 +1,11 @@
-use crate::{
-    database::JobStatusDb,
-    execution::{
-        http::HttpResponse,
-        monitor::{BasicWorkerInfo, Event, ProcessedJobInfo},
-        scheduler::{
-            Job, NotRequested, PlatformCanRequest, PlatformHistory, PlatformT, QueueJob,
-            QueueJobStatus, WorkerAction,
-        },
+use crate::{database::JobStatusDb, execution::{
+    http::HttpResponse,
+    monitor::{BasicWorkerInfo, Event, ProcessedJobInfo},
+    scheduler::{
+        Job, NotRequested, PlatformCanRequest, PlatformHistory, PlatformT, QueueJob,
+        QueueJobStatus, WorkerAction,
     },
-    Result,
-};
+}, Error, Result};
 use anyhow::anyhow;
 use arti::socks::run_socks_proxy;
 use arti_client::{TorClient, TorClientConfig};
@@ -28,6 +24,7 @@ use reqwest::Url;
 use std::{
     collections::HashMap,
     fmt::{Debug, Display, Formatter},
+    io::Read,
     str::FromStr,
     sync::{Arc, Mutex},
     time::Duration,
@@ -122,14 +119,29 @@ impl CTorClient {
             full_body.extend_from_slice(&bytes);
         }
 
-        let body = String::from_utf8(full_body).unwrap();
+        let headers: HashMap<_, _> = resp
+            .headers()
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.as_str().to_string().to_lowercase(),
+                    v.to_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+
+        let body = if let Some("gzip") = headers.get("content-encoding").map(|s| s.as_str()) {
+            let mut decoder = flate2::read::GzDecoder::new(full_body.as_slice());
+            let mut body = Vec::new();
+            decoder.read_to_end(&mut body)?;
+            String::from_utf8(body)
+        } else {
+            String::from_utf8(full_body)
+        }.map_err(|e| Error::ParseError(format!("Failed to decode response body: {:?}", e)))?;
+
         Ok(HttpResponse {
             status: resp.status(),
-            headers: resp
-                .headers()
-                .iter()
-                .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap().to_string()))
-                .collect(),
+            headers,
             body,
         })
     }
@@ -293,7 +305,8 @@ where
     debug!("Starting job for {worker_type} worker {worker_id}");
     let ts_start = quanta::Instant::now();
     let job_platform = job.platform;
-    let platform = platforms.get_mut(&job.platform).unwrap();
+    let platform = platforms.get_mut(&job.platform).
+        expect("Platform not found in platforms hashmap. Ensure you have added your builder to the runtime!");
     match platform.can_request(ts_start) {
         PlatformCanRequest::Ok => {
             return Ok(WorkerLogicAction::ProcessJob((ts_start, job)));

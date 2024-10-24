@@ -1,7 +1,7 @@
 use basic::{backend, cron, headed_browser, headless_browser, http, monitor, Platform};
 use concurrent_tor::{
     browser_box,
-    config::ScraperConfig,
+    config::CTConfig,
     cron_box,
     execution::{runtime::CTRuntime, scheduler::SimpleScheduler},
     http_box,
@@ -28,7 +28,7 @@ async fn main() -> anyhow::Result<()> {
         .output()
         .expect("Failed to kill firefox instances");
 
-    let ct_config = ScraperConfig::<Platform>::init(std::env::var("CT_CONFIG_FP")?)?;
+    let ct_config = CTConfig::<Platform>::init(std::env::var("CT_CONFIG_FP")?)?;
     let ct_rt = CTRuntime::run(
         ct_config.workers,
         monitor::MyMonitor::new(),

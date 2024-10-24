@@ -18,6 +18,7 @@ pub enum Error {
     AsyncChannelError(String),
     FantocciniCmdError(fantoccini::error::CmdError),
     FantocciniNewSessionError(fantoccini::error::NewSessionError),
+    FromUtf8Error(std::str::Utf8Error),
     Other(Box<dyn std::error::Error>),
 }
 
@@ -31,6 +32,12 @@ impl std::error::Error for Error {}
 
 unsafe impl Send for Error {}
 unsafe impl Sync for Error {}
+
+impl From<std::str::Utf8Error> for Error {
+    fn from(e: std::str::Utf8Error) -> Self {
+        Error::FromUtf8Error(e)
+    }
+}
 
 impl From<fantoccini::error::CmdError> for Error {
     fn from(e: fantoccini::error::CmdError) -> Self {
@@ -71,12 +78,6 @@ impl From<anyhow::Error> for Error {
 impl From<sqlx::Error> for Error {
     fn from(e: sqlx::Error) -> Self {
         Error::SqlxError(e)
-    }
-}
-
-impl From<std::str::Utf8Error> for Error {
-    fn from(e: std::str::Utf8Error) -> Self {
-        Error::ParseError(e.to_string())
     }
 }
 

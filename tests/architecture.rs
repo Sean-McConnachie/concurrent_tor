@@ -1,6 +1,6 @@
 use crate::{monitor::GlobalEvent, server::ServerEvent};
 use concurrent_tor::{
-    config::{BrowserPlatformConfig, HttpPlatformConfig, ScraperConfig, WorkerConfig},
+    config::{BrowserPlatformConfig, CTConfig, HttpPlatformConfig, WorkerConfig},
     execution::{
         runtime::CTRuntime,
         scheduler::{PlatformT, SimpleScheduler, WorkerRequest},
@@ -833,7 +833,7 @@ async fn my_main(
         server::start_server(server_addr, server_workers).await?;
     let (implementation_tx, implementation_rx) = async_channel::unbounded::<ImplementationEvent>();
 
-    let ct_config = ScraperConfig {
+    let ct_config = CTConfig {
         workers: WorkerConfig {
             target_circulation: ((http_workers + headed_browser_workers + headless_browser_workers)
                 * 2) as u32,
