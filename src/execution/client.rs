@@ -1,11 +1,15 @@
-use crate::{database::JobStatusDb, execution::{
-    http::HttpResponse,
-    monitor::{BasicWorkerInfo, Event, ProcessedJobInfo},
-    scheduler::{
-        Job, NotRequested, PlatformCanRequest, PlatformHistory, PlatformT, QueueJob,
-        QueueJobStatus, WorkerAction,
+use crate::{
+    database::JobStatusDb,
+    execution::{
+        http::HttpResponse,
+        monitor::{BasicWorkerInfo, Event, ProcessedJobInfo},
+        scheduler::{
+            Job, NotRequested, PlatformCanRequest, PlatformHistory, PlatformT, QueueJob,
+            QueueJobStatus, WorkerAction,
+        },
     },
-}, Error, Result};
+    Error, Result,
+};
 use anyhow::anyhow;
 use arti::socks::run_socks_proxy;
 use arti_client::{TorClient, TorClientConfig};
@@ -137,7 +141,8 @@ impl CTorClient {
             String::from_utf8(body)
         } else {
             String::from_utf8(full_body)
-        }.map_err(|e| Error::ParseError(format!("Failed to decode response body: {:?}", e)))?;
+        }
+        .map_err(|e| Error::ParseError(format!("Failed to decode response body: {:?}", e)))?;
 
         Ok(HttpResponse {
             status: resp.status(),

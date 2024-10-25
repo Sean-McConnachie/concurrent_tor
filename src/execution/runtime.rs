@@ -235,8 +235,8 @@ where
                         &browser_platform_configs,
                         &browser_platforms,
                         worker_config.driver_fp.clone(),
-                        worker_config.socks_start_port,
-                        worker_config.driver_start_port,
+                        worker_config.socks_start_port + n_hl_brsr,
+                        worker_config.driver_start_port + n_hl_brsr,
                     )
                     .await?,
                 );
