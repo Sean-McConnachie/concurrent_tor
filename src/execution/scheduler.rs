@@ -10,7 +10,11 @@ use dyn_clone::DynClone;
 use futures_util::TryFutureExt;
 use log::{debug, error, info, warn};
 use serde::de::DeserializeOwned;
-use std::{fmt::Debug, hash::Hash, sync::Arc};
+use std::{
+    fmt::{Debug, Display},
+    hash::Hash,
+    sync::Arc,
+};
 use strum::IntoEnumIterator;
 use tokio::{sync::Mutex, task::JoinHandle};
 
@@ -229,6 +233,19 @@ where
             max_attempts: job.max_attempts,
             _status: std::marker::PhantomData,
         }
+    }
+}
+
+impl<Status, P> Display for Job<Status, P>
+where
+    P: PlatformT,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Job {{ {:?} | {}/{} | {:?} }}",
+            self.platform, self.num_attempts, self.max_attempts, self.request
+        )
     }
 }
 
