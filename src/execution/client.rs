@@ -43,6 +43,12 @@ use tor_rtcompat::PreferredRuntime;
 
 const TIMEOUT_AFTER_REQUEUE_MS: u64 = 100;
 
+#[derive(Debug)]
+pub enum PlatformResponse<P: PlatformT> {
+    Ok(Vec<QueueJob<P>>),
+    RenewClient(Vec<QueueJob<P>>),
+}
+
 #[async_trait]
 pub trait Client: Send + Sync {
     fn start_proxy(self, port: u16) -> Option<JoinHandle<()>>;

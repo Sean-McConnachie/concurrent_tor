@@ -23,6 +23,7 @@ use tokio::{
     process::{Child, Command},
     task::JoinHandle,
 };
+use crate::client::PlatformResponse;
 
 pub trait BrowserPlatformBuilder<P: PlatformT>: Send + PlatformReturnT<P> {
     fn build(&self) -> Box<dyn BrowserPlatform<P>>;
@@ -35,7 +36,7 @@ pub trait BrowserPlatform<P: PlatformT>: Send {
         &self,
         job: &Job<NotRequested, P>,
         client: &fantoccini::Client,
-    ) -> Vec<QueueJob<P>>;
+    ) -> PlatformResponse<P>;
 }
 
 #[derive(Serialize)]
@@ -289,7 +290,13 @@ where
                 }
                 WorkerLogicAction::ProcessJob((ts_start, job)) => {
                     let platform_impl = self.platform_impls.get(&job.platform).unwrap();
-                    let jobs = platform_impl.process_job(&job, &self.browser).await;
+                    let jobs = match platform_impl.process_job(&job, &self.browser).await {
+                        PlatformResponse::Ok(jobs) => jobs,
+                        PlatformResponse::RenewClient(jobs) => {
+                            self = self.renew_client().await?;
+                            jobs
+                        },
+                    };
                     worker_job_logic_process(
                         ts_start,
                         self.worker_id,

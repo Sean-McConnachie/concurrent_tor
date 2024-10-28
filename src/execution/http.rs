@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use hyper::StatusCode;
 use log::{debug, info};
 use std::collections::HashMap;
+use crate::client::PlatformResponse;
 
 pub trait HttpPlatformBuilder<P: PlatformT, C: Client>: Send + PlatformReturnT<P> {
     fn build(&self) -> Box<dyn HttpPlatform<P, C>>;
@@ -26,7 +27,7 @@ pub trait HttpPlatformBuilder<P: PlatformT, C: Client>: Send + PlatformReturnT<P
 #[async_trait]
 pub trait HttpPlatform<P: PlatformT, C: Client>: Send {
     /// Function should not fail when passed back to the API. Therefore, it should handle all errors itself.
-    async fn process_job(&self, job: &Job<NotRequested, P>, client: &C) -> Vec<QueueJob<P>>;
+    async fn process_job(&self, job: &Job<NotRequested, P>, client: &C) -> PlatformResponse<P>;
 }
 
 #[derive(Debug)]
@@ -166,12 +167,18 @@ where
                     self = self.renew_client()?;
                 }
                 WorkerLogicAction::ProcessJob((ts_start, job)) => {
-                    let jobs = self
+                    let jobs = match self
                         .platform_impls
                         .get(&job.platform)
                         .unwrap()
                         .process_job(&job, &self.client)
-                        .await;
+                        .await {
+                        PlatformResponse::Ok(jobs) => jobs,
+                         PlatformResponse::RenewClient(jobs)=> {
+                            self = self.renew_client()?;
+                            jobs
+                        }
+                    };
                     worker_job_logic_process(
                         ts_start,
                         self.worker_id,
