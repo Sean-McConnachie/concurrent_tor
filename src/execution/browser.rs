@@ -17,7 +17,7 @@ use crate::{
 use async_channel::{Receiver, Sender};
 use async_trait::async_trait;
 use fantoccini::wd::Capabilities;
-use log::{debug, error, info};
+use log::{debug, info};
 use serde::Serialize;
 use std::{collections::HashMap, process::Stdio};
 use tokio::{

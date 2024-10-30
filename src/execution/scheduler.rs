@@ -62,7 +62,7 @@ macro_rules! build_platform_enum {
         { $( $builder:path => $variants:tt ),+ }
     ) => {
         #[derive(serde::Serialize, serde::Deserialize, Debug,
-            Clone, Copy, Hash, Eq, PartialEq, strum::FromRepr, strum::EnumIter)]
+            Clone, Copy, Hash, Eq, PartialEq, strum::FromRepr, strum::EnumIter, strum::IntoStaticStr)]
         pub enum $enum_name {
             $( $variant ),+
         }
