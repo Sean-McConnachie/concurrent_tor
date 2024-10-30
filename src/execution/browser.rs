@@ -299,7 +299,10 @@ where
                             jobs
                         }
                     };
-                    debug_assert!(self.browser.windows().await?.len() <= 1, "Browser must have at most one window open.");
+                    debug_assert!(
+                        self.browser.windows().await?.len() <= 1,
+                        "Browser must have at most one window open."
+                    );
 
                     worker_job_logic_process(
                         ts_start,
