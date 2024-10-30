@@ -161,6 +161,7 @@ impl CTorClient {
 #[async_trait]
 impl Client for CTorClient {
     fn start_proxy(self, port: u16) -> Option<JoinHandle<()>> {
+        debug!("Starting Tor proxy on port {}", port);
         let listen = Listen::new_localhost(port);
         let client = self.client;
         Some(tokio::spawn(async {
@@ -340,7 +341,7 @@ where
             monitor
                 .send(Event::WorkerRateLimited(BasicWorkerInfo::new(
                     job_platform,
-                    WorkerType::Http,
+                    worker_type,
                     worker_id,
                     quanta::Instant::now(),
                 )))
@@ -370,7 +371,7 @@ where
             monitor
                 .send(Event::WorkerRenewingClient(BasicWorkerInfo::new(
                     job_platform,
-                    WorkerType::Http,
+                    worker_type,
                     worker_id,
                     quanta::Instant::now(),
                 )))

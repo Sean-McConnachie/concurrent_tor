@@ -1,4 +1,5 @@
 use crate::{
+    client::PlatformResponse,
     config::BrowserPlatformConfig,
     execution::{
         client::{
@@ -16,14 +17,13 @@ use crate::{
 use async_channel::{Receiver, Sender};
 use async_trait::async_trait;
 use fantoccini::wd::Capabilities;
-use log::{debug, info};
+use log::{debug, error, info};
 use serde::Serialize;
 use std::{collections::HashMap, process::Stdio};
 use tokio::{
     process::{Child, Command},
     task::JoinHandle,
 };
-use crate::client::PlatformResponse;
 
 pub trait BrowserPlatformBuilder<P: PlatformT>: Send + PlatformReturnT<P> {
     fn build(&self) -> Box<dyn BrowserPlatform<P>>;
@@ -224,7 +224,7 @@ where
     }
 
     fn start_proxy_handle(worker_id: u16, main_client: &M, proxy_port: u16) -> JoinHandle<()> {
-        info!("Starting proxy for browser worker {}", worker_id);
+        debug!("Starting proxy for browser worker {}", worker_id);
         if M::use_proxy() {
             let client = main_client.isolated_client();
             client
@@ -236,11 +236,13 @@ where
     }
 
     fn start_driver_handle(worker_id: u16, driver_fp: &str, driver_port: u16) -> Child {
-        info!("Starting driver for browser worker {}", worker_id);
+        debug!("Starting driver for browser worker {}", worker_id);
         Command::new(driver_fp)
             .arg("--port")
             .arg(driver_port.to_string())
             .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .spawn()
             .expect("Failed to start browser")
     }
@@ -295,8 +297,10 @@ where
                         PlatformResponse::RenewClient(jobs) => {
                             self = self.renew_client().await?;
                             jobs
-                        },
+                        }
                     };
+                    debug_assert!(self.browser.windows().await?.len() <= 1, "Browser must have at most one window open.");
+
                     worker_job_logic_process(
                         ts_start,
                         self.worker_id,

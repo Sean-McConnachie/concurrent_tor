@@ -1,4 +1,5 @@
 use crate::{
+    client::PlatformResponse,
     config::HttpPlatformConfig,
     execution::{
         client::{
@@ -18,7 +19,6 @@ use async_trait::async_trait;
 use hyper::StatusCode;
 use log::{debug, info};
 use std::collections::HashMap;
-use crate::client::PlatformResponse;
 
 pub trait HttpPlatformBuilder<P: PlatformT, C: Client>: Send + PlatformReturnT<P> {
     fn build(&self) -> Box<dyn HttpPlatform<P, C>>;
@@ -172,9 +172,10 @@ where
                         .get(&job.platform)
                         .unwrap()
                         .process_job(&job, &self.client)
-                        .await {
+                        .await
+                    {
                         PlatformResponse::Ok(jobs) => jobs,
-                         PlatformResponse::RenewClient(jobs)=> {
+                        PlatformResponse::RenewClient(jobs) => {
                             self = self.renew_client()?;
                             jobs
                         }
