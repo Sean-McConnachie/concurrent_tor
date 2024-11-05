@@ -432,8 +432,9 @@ where
                 original_job_completed = true;
                 if num_attempts != original_job.num_attempts + 1 {
                     panic!(
-                        "Original job has wrong number of attempts in http worker {}. \
-                        Expected {}, got {}. Do not forgot to call .into::<Job<Requests, P>>()!",
+                        "Original job has wrong number of attempts in {} worker {}. \
+                        Expected {}, got {}. Do not forgot to call .into::<Job<Requested, P>>()!",
+                        worker_type,
                         worker_id,
                         original_job.num_attempts + 1,
                         num_attempts
@@ -453,7 +454,10 @@ where
                     )))
                     .await?;
             } else {
-                panic!("Original job found twice in http worker {}", worker_id);
+                panic!(
+                    "Original job found twice in {} worker {}",
+                    worker_type, worker_id
+                );
             }
         }
 
@@ -461,7 +465,8 @@ where
             .send(job)
             .map_err(|e| {
                 anyhow!(
-                    "Failed to send job to queue in http worker {}: {:?}",
+                    "Failed to send job to queue in {} worker {}: {:?}",
+                    worker_type,
                     worker_id,
                     e
                 )

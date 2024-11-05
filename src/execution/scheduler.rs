@@ -715,6 +715,10 @@ where
         if *circulation < target_circulation {
             if let Some(job) = scheduler.lock().await.dequeue() {
                 let sender = &dequeue_job[job.platform.to_repr()];
+                debug!(
+                    "Sender has {} items in queue. Sending job to worker",
+                    sender.len()
+                );
                 sender
                     .send(WorkerAction::Job(job))
                     .map_err(|e| anyhow!("Failed to send job to worker in dequeue loop: {:?}", e))

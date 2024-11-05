@@ -253,6 +253,8 @@ where
         self.browser.close().await?;
         self.driver_handle.kill().await?;
         self.proxy_handle.abort();
+        // Let the driver and proxy die & let OS release the ports
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         let proxy_handle =
             Self::start_proxy_handle(self.worker_id, &self.main_client, self.socks_port);
         let driver_handle =
