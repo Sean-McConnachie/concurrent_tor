@@ -1,5 +1,5 @@
 use crate::{
-    client::PlatformResponse,
+    client::{PlatformResponse, ProxyJoin},
     config::BrowserPlatformConfig,
     execution::{
         client::{
@@ -22,6 +22,7 @@ use serde::Serialize;
 use std::{collections::HashMap, process::Stdio};
 use tokio::{
     process::{Child, Command},
+    sync::oneshot,
     task::JoinHandle,
 };
 
@@ -149,7 +150,7 @@ pub(crate) struct BrowserWorker<P: PlatformT, C: Client, M: MainClient<C>> {
     /// Platform implementations
     platform_impls: HashMap<P, Box<dyn BrowserPlatform<P>>>,
     /// Proxy handle
-    proxy_handle: JoinHandle<()>,
+    proxy_handle: ProxyJoin,
     /// Driver handle
     driver_handle: Child,
     /// Browser client
@@ -223,15 +224,13 @@ where
         })
     }
 
-    fn start_proxy_handle(worker_id: u16, main_client: &M, proxy_port: u16) -> JoinHandle<()> {
+    fn start_proxy_handle(worker_id: u16, main_client: &M, proxy_port: u16) -> ProxyJoin {
         debug!("Starting proxy for browser worker {}", worker_id);
         if M::use_proxy() {
             let client = main_client.isolated_client();
-            client
-                .start_proxy(proxy_port)
-                .expect("Proxy implementation must return a join handle.")
+            client.start_proxy(proxy_port)
         } else {
-            tokio::spawn(async {})
+            (tokio::spawn(async {}), oneshot::channel().0)
         }
     }
 
@@ -252,7 +251,11 @@ where
         self.browser.close_window().await?;
         self.browser.close().await?;
         self.driver_handle.kill().await?;
-        self.proxy_handle.abort();
+        self.proxy_handle
+            .1
+            .send(())
+            .map_err(|_| anyhow::anyhow!("Failed to send to proxy handle"))?;
+        self.proxy_handle.0.await?;
         // Let the driver and proxy die & let OS release the ports
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         let proxy_handle =

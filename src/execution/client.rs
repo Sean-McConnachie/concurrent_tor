@@ -35,6 +35,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
+    sync::oneshot,
     task::JoinHandle,
 };
 use tokio_native_tls::native_tls::TlsConnector;
@@ -49,9 +50,11 @@ pub enum PlatformResponse<P: PlatformT> {
     RenewClient(Vec<QueueJob<P>>),
 }
 
+pub type ProxyJoin = (JoinHandle<()>, oneshot::Sender<()>);
+
 #[async_trait]
 pub trait Client: Send + Sync {
-    fn start_proxy(self, port: u16) -> Option<JoinHandle<()>>;
+    fn start_proxy(self, port: u16) -> ProxyJoin;
 
     async fn make_request(
         &self,
@@ -84,6 +87,7 @@ impl Display for WorkerType {
 
 pub struct CTorClient {
     client: TorClient<PreferredRuntime>,
+    config: TorClientConfig
 }
 
 impl CTorClient {
@@ -160,16 +164,34 @@ impl CTorClient {
 
 #[async_trait]
 impl Client for CTorClient {
-    fn start_proxy(self, port: u16) -> Option<JoinHandle<()>> {
+    fn start_proxy(self, port: u16) -> ProxyJoin {
         debug!("Starting Tor proxy on port {}", port);
-        let listen = Listen::new_localhost(port);
-        let client = self.client;
-        Some(tokio::spawn(async {
-            match run_socks_proxy(client.runtime().clone(), client, listen).await {
-                Ok(_) => debug!("Proxy exited successfully"),
-                Err(e) => error!("Proxy exited with error: {:?}", e),
-            }
-        }))
+        let (abort_tx, abort_rx) = oneshot::channel::<()>();
+        let config = self.config.clone();
+        let handle = tokio::task::spawn_blocking(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+
+            rt.block_on(async move {
+                let listen = Listen::new_localhost(port);
+                let client = TorClient::create_bootstrapped(config)
+                    .await
+                    .unwrap();
+
+                tokio::select! {
+                    _ = run_socks_proxy(client.runtime().clone(), client, listen) => {
+                        debug!("Proxy exited successfully");
+                    }
+                    _ = abort_rx => {
+                        debug!("Proxy task was aborted");
+                    }
+                }
+            });
+        });
+
+        (handle, abort_tx)
     }
 
     async fn make_request(
@@ -203,6 +225,7 @@ impl Client for CTorClient {
 #[derive(Clone)]
 pub struct MainCTorClient {
     client: Arc<Mutex<TorClient<PreferredRuntime>>>,
+    config: TorClientConfig
 }
 
 impl MainClient<CTorClient> for MainCTorClient {
@@ -212,6 +235,7 @@ impl MainClient<CTorClient> for MainCTorClient {
 
     fn isolated_client(&self) -> CTorClient {
         CTorClient {
+            config: self.config.clone(),
             client: self.client.lock().unwrap().isolated_client(),
         }
     }
@@ -220,6 +244,7 @@ impl MainClient<CTorClient> for MainCTorClient {
 impl MainCTorClient {
     pub async fn new(config: TorClientConfig) -> Result<Self> {
         Ok(MainCTorClient {
+            config: config.clone(),
             client: Arc::new(Mutex::new(TorClient::create_bootstrapped(config).await?)),
         })
     }
@@ -235,7 +260,7 @@ pub struct CStandardClient {
 
 #[async_trait]
 impl Client for CStandardClient {
-    fn start_proxy(self, #[allow(unused_variables)] port: u16) -> Option<JoinHandle<()>> {
+    fn start_proxy(self, #[allow(unused_variables)] port: u16) -> ProxyJoin {
         unreachable!("Standard client does not support proxies")
     }
 
