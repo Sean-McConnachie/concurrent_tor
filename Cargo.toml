@@ -19,15 +19,15 @@ strum = "0.26.3"
 strum_macros = "0.26.3"
 futures-util = "0.3.31"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
-arti-client = "0.22.0"
+arti-client = "0.24.0"
 http-body-util = "0.1.0"
 hyper = { version = "1", features = ["http1", "client"] }
 hyper-util = { version = "0.1.1", features = ["tokio"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tokio-native-tls = "0.3.1"
-tor-rtcompat = "0.22.0"
+tor-rtcompat = "0.24.0"
 arti = { version = "1.2.7", features = ["experimental-api"] }
-tor-config = "0.22.0"
+tor-config = "0.24.0"
 dyn-clone = "=1.0.17"
 rand = "0.8.5"
 

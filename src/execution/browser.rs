@@ -23,7 +23,6 @@ use std::{collections::HashMap, process::Stdio};
 use tokio::{
     process::{Child, Command},
     sync::oneshot,
-    task::JoinHandle,
 };
 
 pub trait BrowserPlatformBuilder<P: PlatformT>: Send + PlatformReturnT<P> {

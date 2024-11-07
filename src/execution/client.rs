@@ -23,7 +23,7 @@ use hyper::{
     Method, Request, Uri,
 };
 use hyper_util::rt::TokioIo;
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use reqwest::Url;
 use std::{
     collections::HashMap,
